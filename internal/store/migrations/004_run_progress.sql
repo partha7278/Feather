@@ -1,0 +1,11 @@
+-- How many documents a run set out to archive.
+--
+-- The runner already counted this — it ran CountDocuments over the filter,
+-- logged the number and threw it away. Keeping it makes a long run legible:
+-- "batch 412, 38,000 of ~120,000" instead of a rising figure with nothing to
+-- compare it against. It is also what a progress bar and a "this run is stuck"
+-- alert both need.
+--
+-- 0 means "not recorded", which is what every run from before this column
+-- reads as, and what a dry run that never got as far as counting reads as too.
+ALTER TABLE feather_runs ADD COLUMN docs_matched INTEGER NOT NULL DEFAULT 0;

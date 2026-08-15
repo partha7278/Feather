@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -12,18 +13,41 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
-// Client wraps the Mongo driver with the settings feather needs: retryable
-// reads, no retryable writes (deletes are already chunked and idempotent), and
-// a short server selection timeout so a dead replica fails the run fast.
+// Client wraps the Mongo driver with the settings feather needs.
+//
+// These were previously described here and not applied. They are applied now:
+//
+//   - Retryable reads, because a long archive read should survive a failover.
+//   - Retryable writes off. feather's own retry wraps DeleteMany, and the id
+//     list makes it idempotent, so the driver retrying underneath as well only
+//     obscures which layer did what.
+//   - A server selection timeout of 15s rather than the default 30, so a dead
+//     replica set fails the run inside a batch instead of a minute later.
+//   - A pool sized for the work: a handful of concurrent jobs, each with one
+//     cursor and one delete in flight. The default of 100 is a lot of idle
+//     connections for a small VPS to hold open against a shared cluster.
+//   - No client-wide operation timeout. It would apply to the archive cursor
+//     too, and a batch read can legitimately take minutes; the run's own
+//     MaxRuntime is the bound that belongs here.
 type Client struct {
 	client *mongo.Client
 }
+
+const (
+	serverSelectionTimeout = 15 * time.Second
+	connectTimeout         = 15 * time.Second
+	maxPoolSize            = 16
+)
 
 func Connect(ctx context.Context, uri, authSource, appName string) (*Client, error) {
 	opts := options.Client().
 		ApplyURI(uri).
 		SetAppName(appName).
 		SetRetryReads(true).
+		SetRetryWrites(false).
+		SetServerSelectionTimeout(serverSelectionTimeout).
+		SetConnectTimeout(connectTimeout).
+		SetMaxPoolSize(maxPoolSize).
 		SetCompressors([]string{"zstd", "snappy", "zlib"})
 
 	// Only fill in the auth source when the URI actually carries credentials.

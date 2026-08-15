@@ -54,6 +54,7 @@ type Run struct {
 	DryRun          bool
 	StartedAt       time.Time
 	FinishedAt      *time.Time
+	DocsMatched     int64
 	DocsScanned     int64
 	DocsArchived    int64
 	DocsDeleted     int64
@@ -129,12 +130,25 @@ type RunSummary struct {
 	DryRun       bool
 	StartedAt    time.Time
 	FinishedAt   *time.Time
+	DocsMatched  int64
 	DocsScanned  int64
 	DocsArchived int64
 	DocsDeleted  int64
 	BytesStored  int64
 	Batches      int
 	Error        string
+}
+
+// Progress is how far through its matched documents this run has archived, as a
+// percentage. It reports 0 when the total is unknown — a run from before the
+// count was recorded, or a dry run that never got that far — so a caller should
+// check DocsMatched before showing a bar.
+func (r RunSummary) Progress() int {
+	if r.DocsMatched <= 0 {
+		return 0
+	}
+	pct := int(r.DocsArchived * 100 / r.DocsMatched)
+	return min(pct, 100)
 }
 
 // Duration is how long a run took, or how long it has been going.

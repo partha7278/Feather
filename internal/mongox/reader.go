@@ -3,6 +3,7 @@ package mongox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -59,7 +60,14 @@ func OpenCursor(ctx context.Context, coll *mongo.Collection, filter, projection 
 		SetBatchSize(fetchSize).
 		// Archive runs are long; the default 10-minute idle cursor timeout would
 		// kill a run that spends its time uploading rather than reading.
-		SetNoCursorTimeout(true)
+		SetNoCursorTimeout(true).
+		// The sort is on _id, which every collection indexes, so the planner
+		// normally satisfies it from that index. But a more selective index on
+		// a filtered field can win, and then the sort becomes a blocking stage
+		// bounded by MongoDB's 100 MB in-memory limit — which shows up as a
+		// mysterious mid-run failure on exactly the large collections feather
+		// exists for.
+		SetAllowDiskUse(true)
 
 	if projection != nil {
 		// _id is required: it is how the documents get deleted afterwards.
@@ -71,6 +79,57 @@ func OpenCursor(ctx context.Context, coll *mongo.Collection, filter, projection 
 		return nil, fmt.Errorf("opening cursor on %s.%s: %w", coll.Database().Name(), coll.Name(), err)
 	}
 	return &Cursor{cursor: cursor, timestampField: timestampField}, nil
+}
+
+// MaxID reports the largest _id currently matching the filter, and whether
+// there was one at all.
+//
+// A run reads through a live cursor, not a snapshot, so a document inserted
+// while the run is working — matching the filter, with an _id ahead of where
+// the cursor has reached — is picked up and, if deletion is on, deleted. For
+// ObjectId ids and an "older than 90 days" filter that cannot happen, because
+// new ids sort last and new documents do not match. For custom or UUID ids, a
+// backdated import, or any filter over a mutable field, it can.
+//
+// Fencing the run at the largest id present when it started makes the set it
+// covers well defined: everything that matched at the moment the run began, and
+// nothing that arrived afterwards. Anything newer is simply the next run's
+// work, which is what an operator reading "archives documents older than 90
+// days" already assumes.
+func MaxID(ctx context.Context, coll *mongo.Collection, filter bson.D) (bson.RawValue, bool, error) {
+	opts := options.FindOne().
+		SetSort(bson.D{{Key: "_id", Value: -1}}).
+		SetProjection(bson.D{{Key: "_id", Value: 1}})
+
+	var doc bson.Raw
+	err := coll.FindOne(ctx, filter, opts).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return bson.RawValue{}, false, nil
+	}
+	if err != nil {
+		return bson.RawValue{}, false, fmt.Errorf("finding the highest matching _id in %s.%s: %w",
+			coll.Database().Name(), coll.Name(), err)
+	}
+
+	id, err := doc.LookupErr("_id")
+	if err != nil {
+		return bson.RawValue{}, false, fmt.Errorf("the highest matching document in %s.%s has no _id",
+			coll.Database().Name(), coll.Name())
+	}
+	// Detached from the document buffer: see archive.copyRawValue for why.
+	value := make([]byte, len(id.Value))
+	copy(value, id.Value)
+	return bson.RawValue{Type: id.Type, Value: value}, true, nil
+}
+
+// FenceAtID returns the filter with an upper bound on _id added, so a run only
+// sees documents that already existed when it started.
+func FenceAtID(filter bson.D, maxID bson.RawValue) bson.D {
+	fence := bson.D{{Key: "_id", Value: bson.D{{Key: "$lte", Value: maxID}}}}
+	if len(filter) == 0 {
+		return fence
+	}
+	return bson.D{{Key: "$and", Value: bson.A{filter, fence}}}
 }
 
 // Next advances the cursor. A false return with a nil error means the result

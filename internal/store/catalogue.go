@@ -41,11 +41,11 @@ func (s *Store) FinishRun(ctx context.Context, run *Run) error {
 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE feather_runs SET
-			status = ?, finished_at = ?, docs_scanned = ?, docs_archived = ?,
+			status = ?, finished_at = ?, docs_matched = ?, docs_scanned = ?, docs_archived = ?,
 			docs_deleted = ?, bytes_raw = ?, bytes_compressed = ?, batch_count = ?,
 			error = NULLIF(?, '')
 		WHERE id = ?`,
-		string(run.Status), timeText(finished), run.DocsScanned, run.DocsArchived,
+		string(run.Status), timeText(finished), run.DocsMatched, run.DocsScanned, run.DocsArchived,
 		run.DocsDeleted, run.BytesRaw, run.BytesCompressed, run.BatchCount,
 		truncate(run.Error, 4000), run.ID.String())
 	if err != nil {
@@ -59,10 +59,10 @@ func (s *Store) FinishRun(ctx context.Context, run *Run) error {
 func (s *Store) UpdateRunProgress(ctx context.Context, run *Run) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE feather_runs SET
-			docs_scanned = ?, docs_archived = ?, docs_deleted = ?,
+			docs_matched = ?, docs_scanned = ?, docs_archived = ?, docs_deleted = ?,
 			bytes_raw = ?, bytes_compressed = ?, batch_count = ?
 		WHERE id = ?`,
-		run.DocsScanned, run.DocsArchived, run.DocsDeleted,
+		run.DocsMatched, run.DocsScanned, run.DocsArchived, run.DocsDeleted,
 		run.BytesRaw, run.BytesCompressed, run.BatchCount, run.ID.String())
 	return err
 }
@@ -218,7 +218,7 @@ func (s *Store) FailStaleRuns(ctx context.Context, host string) (int64, error) {
 
 const runColumns = `
 	id, config_name, status, trigger, dry_run, started_at, finished_at,
-	docs_scanned, docs_archived, docs_deleted, bytes_compressed, batch_count, COALESCE(error, '')`
+	docs_matched, docs_scanned, docs_archived, docs_deleted, bytes_compressed, batch_count, COALESCE(error, '')`
 
 func scanRunSummary(rows interface{ Scan(...any) error }) (RunSummary, error) {
 	var (
@@ -229,8 +229,8 @@ func scanRunSummary(rows interface{ Scan(...any) error }) (RunSummary, error) {
 		finishedAt          sql.NullString
 	)
 	if err := rows.Scan(&id, &summary.ConfigName, &status, &trigger, &dryRun, &startedAt, &finishedAt,
-		&summary.DocsScanned, &summary.DocsArchived, &summary.DocsDeleted, &summary.BytesStored,
-		&summary.Batches, &summary.Error); err != nil {
+		&summary.DocsMatched, &summary.DocsScanned, &summary.DocsArchived, &summary.DocsDeleted,
+		&summary.BytesStored, &summary.Batches, &summary.Error); err != nil {
 		return summary, err
 	}
 	summary.RunID, _ = uuid.Parse(id)

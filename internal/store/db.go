@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 
@@ -299,9 +300,18 @@ func boolToInt(v bool) int {
 	return 0
 }
 
+// truncate caps a stored string, cutting on a rune boundary.
+//
+// Slicing by bytes could land mid-rune and store an invalid UTF-8 sequence,
+// which then renders as a replacement character in the UI — in an error
+// message, where the operator is already trying to work out what went wrong.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

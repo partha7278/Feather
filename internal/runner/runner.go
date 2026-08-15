@@ -89,7 +89,7 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 
 	lock, acquired, err := r.store.TryLockJob(ctx, job.Name)
 	if err != nil {
-		return nil, err
+		return &Outcome{Status: store.RunFailed}, err
 	}
 	if !acquired {
 		log.Warn("skipping run, config is already running elsewhere")
@@ -118,7 +118,7 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 
 	resolvedFilter, err := config.ResolveTimeTokens(job.Source.Filter, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("resolving filter for %s: %w", job.Name, err)
+		return &Outcome{Status: store.RunFailed}, fmt.Errorf("resolving filter for %s: %w", job.Name, err)
 	}
 	// The config file's formatting would otherwise put newlines through the log
 	// line and the catalogue row.
@@ -128,11 +128,11 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 	}
 	filter, err := mongox.ParseFilter(resolvedFilter)
 	if err != nil {
-		return nil, err
+		return &Outcome{Status: store.RunFailed}, err
 	}
 	projection, err := mongox.ParseProjection(job.Source.Projection)
 	if err != nil {
-		return nil, err
+		return &Outcome{Status: store.RunFailed}, err
 	}
 
 	run := &store.Run{
@@ -147,7 +147,7 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 		DryRun:       job.DryRun,
 	}
 	if err := r.store.StartRun(ctx, run); err != nil {
-		return nil, err
+		return &Outcome{Status: store.RunFailed}, err
 	}
 	log = log.With("run_id", run.ID)
 	log.Info("run started", "filter", string(resolvedFilter), "dry_run", job.DryRun,
@@ -191,7 +191,15 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 	outcome.Status = run.Status
 	outcome.Err = runErr
 
-	log.Info("run finished",
+	// The terminal event of an unattended job that deletes production data is
+	// the one line an operator greps for. Logging a failed run at info meant
+	// anyone alerting on level=ERROR saw the caller's line, if anything, and
+	// never the summary that says what actually happened.
+	level := slog.LevelInfo
+	if run.Status == store.RunFailed || run.Status == store.RunPartial {
+		level = slog.LevelError
+	}
+	log.Log(ctx, level, "run finished",
 		"status", run.Status,
 		"scanned", run.DocsScanned,
 		"archived", run.DocsArchived,
@@ -199,6 +207,7 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 		"batches", run.BatchCount,
 		"raw", config.HumanBytes(run.BytesRaw),
 		"stored", config.HumanBytes(run.BytesCompressed),
+		"duration", time.Since(run.StartedAt).Round(time.Second),
 		"error", runErr)
 
 	return outcome, runErr
@@ -206,6 +215,19 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 
 func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobConfig, run *store.Run, filter, projection bson.D) (*Outcome, error) {
 	outcome := &Outcome{}
+
+	// The counters are copied out on the way past whatever happens, not only on
+	// the success path. A run that failed at batch 40 of 100 really did archive
+	// and delete 39 batches' worth, and reporting DocsDeleted: 0 for it made the
+	// caller's log disagree with both the run row and MongoDB.
+	defer func() {
+		outcome.DocsScanned = run.DocsScanned
+		outcome.DocsArchived = run.DocsArchived
+		outcome.DocsDeleted = run.DocsDeleted
+		outcome.Batches = run.BatchCount
+		outcome.BytesRaw = run.BytesRaw
+		outcome.BytesStored = run.BytesCompressed
+	}()
 
 	targets, err := r.registry.Resolve(job.Destinations)
 	if err != nil {
@@ -221,6 +243,20 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		return outcome, err
 	}
 
+	// Fence the run at the highest id that matches right now. Everything the
+	// run touches — the count, the cursor, and every delete — uses the fenced
+	// filter, so a document written while the run is working belongs to the
+	// next run rather than being swept up by this one.
+	maxID, found, err := mongox.MaxID(ctx, coll, filter)
+	if err != nil {
+		return outcome, err
+	}
+	if !found {
+		log.Info("documents matched", "count", 0)
+		return outcome, nil
+	}
+	filter = mongox.FenceAtID(filter, maxID)
+
 	matching, err := mongox.Count(ctx, coll, filter)
 	if err != nil {
 		return outcome, fmt.Errorf("counting matching documents: %w", err)
@@ -228,6 +264,14 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 	log.Info("documents matched", "count", matching)
 	if matching == 0 {
 		return outcome, nil
+	}
+	// Kept on the run so progress can be reported against it: the count was
+	// previously computed, logged and thrown away, which is why a long run
+	// could only be watched by refreshing a page and squinting at a rising
+	// number with nothing to compare it to.
+	run.DocsMatched = matching
+	if err := r.store.UpdateRunProgress(ctx, run); err != nil {
+		log.Warn("could not record the matched count", "error", err)
 	}
 
 	cursor, err := mongox.OpenCursor(ctx, coll, filter, projection, job.Batch.FetchSize, job.Source.TimestampField)
@@ -276,12 +320,6 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		}
 	}
 
-	outcome.DocsScanned = run.DocsScanned
-	outcome.DocsArchived = run.DocsArchived
-	outcome.DocsDeleted = run.DocsDeleted
-	outcome.Batches = run.BatchCount
-	outcome.BytesRaw = run.BytesRaw
-	outcome.BytesStored = run.BytesCompressed
 	return outcome, nil
 }
 
@@ -417,20 +455,37 @@ func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.Jo
 
 	// Every copy is stored and verified; the source documents may now go.
 	deleted, err := mongox.DeleteByIDs(ctx, log, coll, filter, b.spool.IDs(), job.Retention.DeleteBatchSize)
+
+	// Counted before the error is checked, and recorded before it is returned.
+	// A failure partway through returns the number of chunks that did succeed,
+	// and those documents really are gone — dropping the count on the error
+	// path left the run row and the catalogue both claiming nothing had been
+	// deleted from a collection that was missing rows.
+	run.DocsDeleted += deleted
+	if markErr := r.store.MarkArtifactDeleted(context.WithoutCancel(ctx), artifact.ID, deleted); markErr != nil {
+		// This is the one place feather can fail *after* destroying something.
+		// The documents are gone; if the catalogue does not say which archive
+		// holds them, the answer to "where did they go?" is lost with them. So
+		// it stops the run loudly rather than carrying on to the next batch.
+		log.Error("documents were deleted but the catalogue could not record it",
+			"artifact", artifact.ID, "deleted", deleted, "error", markErr)
+		if err == nil {
+			return fmt.Errorf("deleted %d documents from %s.%s but could not record it against archive %s: %w",
+				deleted, job.Source.Database, job.Source.Collection, result.FileName, markErr)
+		}
+	}
 	if err != nil {
 		return err
 	}
-	run.DocsDeleted += deleted
-
-	if err := r.store.MarkArtifactDeleted(ctx, artifact.ID, deleted); err != nil {
-		log.Warn("could not record deletion in catalogue", "error", err)
-	}
 
 	// A shortfall means some documents stopped matching the filter between the
-	// read and the delete. They are intentionally left in place.
+	// read and the delete. They are intentionally left in place — but it is
+	// worth a warning, not an info line: it means the collection is being
+	// written while the retention window is being archived, which is usually a
+	// sign the filter is not as settled as the operator believes.
 	if deleted < result.DocCount {
-		log.Info("some archived documents no longer matched the filter and were kept",
-			"archived", result.DocCount, "deleted", deleted)
+		log.Warn("some archived documents no longer matched the filter and were kept",
+			"archived", result.DocCount, "deleted", deleted, "kept", result.DocCount-deleted)
 	}
 	log.Info("batch complete", "deleted", deleted)
 	return nil

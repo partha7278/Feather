@@ -278,6 +278,9 @@ func runOnce(ctx context.Context, env *config.Env, log *slog.Logger, name string
 	if err != nil {
 		return err
 	}
+	if record.Broken() {
+		return fmt.Errorf("config %s cannot be run: %s", name, record.Problem)
+	}
 	if forceDryRun {
 		record.Config.DryRun = true
 	}
@@ -285,8 +288,17 @@ func runOnce(ctx context.Context, env *config.Env, log *slog.Logger, name string
 		return err
 	}
 
-	_, err = a.Runner.Run(ctx, record.Config, store.TriggerManual)
-	return err
+	_, runErr := a.Runner.Run(ctx, record.Config, store.TriggerManual)
+
+	// A one-shot run leaves a spool file behind if it dies partway, and unlike
+	// serve and daemon there is no next startup to sweep it up — so a cron
+	// entry calling `feather run` would fill the spool directory over time.
+	if removed, err := archive.CleanSpoolDir(env.SpoolDir); err != nil {
+		log.Warn("could not clean spool dir", "error", err)
+	} else if removed > 0 {
+		log.Info("removed orphaned spool files", "count", removed)
+	}
+	return runErr
 }
 
 func runValidate(ctx context.Context, env *config.Env, log *slog.Logger) error {
