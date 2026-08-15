@@ -14,7 +14,7 @@
   "batch": { "maxDocs": 50000, "maxBytes": "256MB" },
   "compression": { "codec": "gzip", "level": 6 },
   "output": {
-    "keyTemplate": "archive/{db}/{collection}/{yyyy}-{MM}/{config}-{ts}-{seq}{ext}"
+    "keyTemplate": "archive/{db}/{collection}/{yyyy}-{MM}/{config}-{ts}-{runId}-{seq}{ext}"
   },
   "destinations": ["s3-primary", "s3-backup-acct", "oci-cold"],
   "retention": { "deleteAfterArchive": true, "deleteBatchSize": 5000 },

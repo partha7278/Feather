@@ -72,6 +72,55 @@ func TestValidateKeyTemplate(t *testing.T) {
 	if !strings.Contains(err.Error(), "{colletion}") {
 		t.Errorf("the error does not point at the typo: %v", err)
 	}
+
+	// Shapes that produce a key nobody meant. On Drive every segment becomes a
+	// real folder, so ".." would make one called "..".
+	malformed := []string{
+		"/archive/{runId}{ext}",
+		"archive//{runId}{ext}",
+		"archive/../{runId}{ext}",
+		"archive/./{runId}{ext}",
+		`archive\{runId}{ext}`,
+		"",
+	}
+	for _, template := range malformed {
+		if err := ValidateKeyTemplate(template); err == nil {
+			t.Errorf("%q was accepted as a file name template", template)
+		}
+	}
+}
+
+// The rule that stops a run overwriting an earlier run's archive. A template
+// built from {seq} alone renders the same keys every time; when the earlier
+// run deleted its documents, the overwrite destroys the only copy of them.
+func TestKeyTemplateMustCarryTheRunID(t *testing.T) {
+	if err := RequiresRunID("{config}-{ts}-{seq}{ext}"); err == nil {
+		t.Error("a template without {runId} was accepted — a later run would overwrite this one")
+	}
+	if err := RequiresRunID(DefaultKeyTemplate); err != nil {
+		t.Errorf("the default template does not satisfy the rule it is supposed to model: %v", err)
+	}
+}
+
+// Prepare must keep loading a config stored before the {runId} rule existed:
+// refusing at load time would make an upgraded installation unbootable, and
+// nobody could open the panel to fix the config that was blocking boot.
+// CheckSafeToRun is where the refusal belongs.
+func TestAConfigWithoutRunIDLoadsButCannotRun(t *testing.T) {
+	job := &JobConfig{
+		Name:         "orders-archive",
+		Source:       Source{Database: "shop", Collection: "orders", Filter: []byte(`{"a":1}`)},
+		Output:       Output{KeyTemplate: "archive/{collection}/{seq}{ext}"},
+		Destinations: []string{"s3-primary"},
+		Schedule:     Schedule{Every: "1d"},
+	}
+
+	if err := job.Prepare(); err != nil {
+		t.Fatalf("an existing config failed to load, which would block boot: %v", err)
+	}
+	if err := job.CheckSafeToRun(); err == nil {
+		t.Error("a config that would overwrite an earlier archive was cleared to run")
+	}
 }
 
 func TestPrepareFillsDefaultsAndResolvesSchedule(t *testing.T) {

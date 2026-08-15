@@ -202,44 +202,83 @@ func (d *GDriveDestination) Upload(ctx context.Context, key string, body io.Read
 	return stored.Id, nil
 }
 
-// Verify re-reads the stored file's metadata and compares its size and
-// checksum. Drive computes a SHA-256 of its own, which is a stronger check than
-// the one feather records alongside the file, so both are compared when present.
-func (d *GDriveDestination) Verify(ctx context.Context, key string, wantSize int64, wantSHA256 string) error {
-	dir, name := path.Split(key)
+// locate finds the Drive file ID for a stored object. The handle Upload
+// returned is preferred and used directly: Drive's query index lags writes, so
+// searching by name right after an upload can miss a file that is certainly
+// there. Falling back to the name search covers a copy written before handles
+// were recorded.
+func (d *GDriveDestination) locate(ctx context.Context, key, handle string) (string, error) {
+	if handle != "" {
+		return handle, nil
+	}
 
+	dir, name := path.Split(key)
 	parent, err := d.resolveFolders(ctx, dir)
 	if err != nil {
-		return fmt.Errorf("verifying %s (%s): %w", d.info.Alias, key, err)
+		return "", err
 	}
 	id, err := d.findChild(ctx, parent, name)
 	if err != nil {
-		return fmt.Errorf("verifying %s (%s): %w", d.info.Alias, key, err)
+		return "", err
 	}
 	if id == "" {
-		return fmt.Errorf("verifying %s (%s): the uploaded file is not in the folder it was written to", d.info.Alias, key)
+		return "", fmt.Errorf("no file named %q in the folder it was written to", name)
+	}
+	return id, nil
+}
+
+// Open streams the stored file back.
+func (d *GDriveDestination) Open(ctx context.Context, key, handle string) (io.ReadCloser, error) {
+	id, err := d.locate(ctx, key, handle)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s (%s): %w", d.info.Alias, key, driveError(err))
+	}
+
+	resp, err := d.svc.Files.Get(id).
+		SupportsAllDrives(true).
+		Context(ctx).Download()
+	if err != nil {
+		return nil, fmt.Errorf("reading %s (%s): %w", d.info.Alias, key, driveError(err))
+	}
+	return resp.Body, nil
+}
+
+// Verify re-reads the stored file and hashes it.
+//
+// Drive is the one provider that offers a genuinely independent signal:
+// sha256Checksum is computed by Google over the stored bytes, so it is not
+// feather's own value handed back. It is checked first because it is nearly
+// free. The full download still follows — the checksum field is documented as
+// unavailable for some file types, and "the field was empty" must not be
+// allowed to read as "verified".
+func (d *GDriveDestination) Verify(ctx context.Context, obj StoredObject) error {
+	id, err := d.locate(ctx, obj.Key, obj.Handle)
+	if err != nil {
+		return fmt.Errorf("verifying %s (%s): %w", d.info.Alias, obj.Key, driveError(err))
 	}
 
 	file, err := d.svc.Files.Get(id).
-		Fields("id,size,sha256Checksum,appProperties,trashed").
+		Fields("id,size,sha256Checksum,trashed").
 		SupportsAllDrives(true).
 		Context(ctx).Do()
 	if err != nil {
-		return fmt.Errorf("verifying %s (%s): %w", d.info.Alias, key, driveError(err))
+		return fmt.Errorf("verifying %s (%s): %w", d.info.Alias, obj.Key, driveError(err))
 	}
 	if file.Trashed {
-		return fmt.Errorf("verifying %s (%s): the stored file is in the trash", d.info.Alias, key)
+		return fmt.Errorf("verifying %s (%s): the stored file is in the trash", d.info.Alias, obj.Key)
 	}
-	if file.Size != wantSize {
-		return fmt.Errorf("verifying %s (%s): stored file is %d bytes, expected %d", d.info.Alias, key, file.Size, wantSize)
+	if file.Size != obj.Size {
+		return fmt.Errorf("verifying %s (%s): stored file is %d bytes, expected %d",
+			d.info.Alias, obj.Key, file.Size, obj.Size)
 	}
-	if file.Sha256Checksum != "" && !strings.EqualFold(file.Sha256Checksum, wantSHA256) {
-		return fmt.Errorf("verifying %s (%s): Drive's checksum %s does not match %s", d.info.Alias, key, file.Sha256Checksum, wantSHA256)
+	if file.Sha256Checksum != "" && !strings.EqualFold(file.Sha256Checksum, obj.SHA256) {
+		return fmt.Errorf("verifying %s (%s): Drive's checksum %s does not match %s",
+			d.info.Alias, obj.Key, file.Sha256Checksum, obj.SHA256)
 	}
-	if recorded := file.AppProperties[metaSHA256]; recorded != "" && !strings.EqualFold(recorded, wantSHA256) {
-		return fmt.Errorf("verifying %s (%s): stored checksum %s does not match %s", d.info.Alias, key, recorded, wantSHA256)
-	}
-	return nil
+
+	// Pass the resolved ID down so the download does not repeat the lookup.
+	obj.Handle = id
+	return VerifyByReading(ctx, d, obj)
 }
 
 // ensureFolders walks a slash-separated path from the destination's root,

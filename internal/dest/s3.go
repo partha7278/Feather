@@ -140,33 +140,66 @@ func (d *S3Destination) Upload(ctx context.Context, key string, body io.Reader, 
 	return aws.ToString(out.ETag), nil
 }
 
-// Verify re-reads the object's metadata. Size is compared always; the checksum
-// is compared when the service returned the metadata we set. ETag is
-// deliberately not used — for a multipart upload it is not the object's MD5.
-func (d *S3Destination) Verify(ctx context.Context, key string, wantSize int64, wantSHA256 string) error {
-	head, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+// Open streams the stored object back. The ETag handle is not usable as a
+// locator on S3, so the key is what finds the object.
+func (d *S3Destination) Open(ctx context.Context, key, _ string) (io.ReadCloser, error) {
+	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(d.info.Bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return fmt.Errorf("verifying %s (%s/%s): %w", d.info.Alias, d.info.Bucket, key, friendly(err))
+		return nil, fmt.Errorf("reading %s (%s/%s): %w", d.info.Alias, d.info.Bucket, key, friendly(err))
+	}
+	return out.Body, nil
+}
+
+// Verify downloads the object and hashes it.
+//
+// A HEAD would be cheaper, and that is what this used to do — comparing the
+// length and the sha256 user-metadata value. But that metadata is a string
+// feather set on the way up, so comparing it to feather's own variable tests
+// nothing about the bytes that landed, and a service that drops user metadata
+// (some S3-compatible gateways do, on multipart) turned the check into a
+// length comparison that silently passed. Documents were deleted on that.
+//
+// The HEAD is still worth issuing first: it fails fast and cheaply on a
+// missing or truncated object, and it is where the storage class is checked.
+func (d *S3Destination) Verify(ctx context.Context, obj StoredObject) error {
+	head, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(d.info.Bucket),
+		Key:    aws.String(obj.Key),
+	})
+	if err != nil {
+		return fmt.Errorf("verifying %s (%s/%s): %w", d.info.Alias, d.info.Bucket, obj.Key, friendly(err))
+	}
+	if got := aws.ToInt64(head.ContentLength); got != obj.Size {
+		return fmt.Errorf("verifying %s (%s/%s): stored object is %d bytes, expected %d",
+			d.info.Alias, d.info.Bucket, obj.Key, got, obj.Size)
 	}
 
-	if got := aws.ToInt64(head.ContentLength); got != wantSize {
-		return fmt.Errorf("verifying %s (%s/%s): stored object is %d bytes, expected %d", d.info.Alias, d.info.Bucket, key, got, wantSize)
+	// An archived-tier object answers HEAD but cannot be read without a restore
+	// job that takes hours. Saying so here is much kinder than a download that
+	// fails with InvalidObjectState.
+	if class := string(head.StorageClass); isArchivalClass(class) {
+		return fmt.Errorf("verifying %s (%s/%s): the object is in storage class %s and cannot be read back without a restore, so this copy cannot be verified",
+			d.info.Alias, d.info.Bucket, obj.Key, class)
 	}
 
-	// Metadata keys come back lowercased; look the value up case-insensitively
-	// rather than trusting a particular service's normalisation.
-	for k, v := range head.Metadata {
-		if strings.EqualFold(k, metaSHA256) {
-			if !strings.EqualFold(v, wantSHA256) {
-				return fmt.Errorf("verifying %s (%s/%s): stored checksum %s does not match %s", d.info.Alias, d.info.Bucket, key, v, wantSHA256)
-			}
-			return nil
-		}
+	return VerifyByReading(ctx, d, obj)
+}
+
+// isArchivalClass reports whether objects in this storage class need an
+// asynchronous restore before they can be read.
+func isArchivalClass(class string) bool {
+	switch strings.ToUpper(strings.TrimSpace(class)) {
+	case "GLACIER", "DEEP_ARCHIVE", "GLACIER_IR", "ARCHIVE":
+		// GLACIER_IR is readable immediately, but only on AWS; the compatible
+		// services that borrow the name are not consistent about it. Treating
+		// it as archival costs a config change and prevents a false verify.
+		return true
+	default:
+		return false
 	}
-	return nil
 }
 
 func contentTypeFor(key string) string {

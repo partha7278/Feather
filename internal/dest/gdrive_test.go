@@ -85,21 +85,96 @@ func TestGDriveVerifyChecksSizeAndChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := destination.Verify(ctx, key, int64(len(body)), sum(body)); err != nil {
+	good := StoredObject{Key: key, Size: int64(len(body)), SHA256: sum(body)}
+	if err := destination.Verify(ctx, good); err != nil {
 		t.Fatalf("a good copy failed verification: %v", err)
 	}
 
-	if err := destination.Verify(ctx, key, int64(len(body))+1, sum(body)); err == nil {
+	wrongSize := good
+	wrongSize.Size++
+	if err := destination.Verify(ctx, wrongSize); err == nil {
 		t.Error("verification passed a file of the wrong size")
 	}
-	if err := destination.Verify(ctx, key, int64(len(body)), sum("something else")); err == nil {
+
+	wrongSum := good
+	wrongSum.SHA256 = sum("something else")
+	if err := destination.Verify(ctx, wrongSum); err == nil {
 		t.Error("verification passed a file with the wrong checksum")
+	}
+
+	// An expected digest of "" must not be treated as "nothing to compare, so
+	// it matches" — that would wave through every copy on the deletion path.
+	noSum := good
+	noSum.SHA256 = ""
+	if err := destination.Verify(ctx, noSum); err == nil {
+		t.Error("verification passed a copy it had no checksum to compare")
 	}
 
 	// A missing file is the failure that must never be mistaken for success:
 	// deletion from MongoDB is what happens on the other side of this check.
-	if err := destination.Verify(ctx, "feather/never-written.ndjson.gz", 1, sum(body)); err == nil {
+	missing := StoredObject{Key: "feather/never-written.ndjson.gz", Size: 1, SHA256: sum(body)}
+	if err := destination.Verify(ctx, missing); err == nil {
 		t.Error("verification passed a file that was never uploaded")
+	}
+}
+
+// The point of the rewrite: verification reads the stored bytes rather than
+// trusting metadata. A file whose content was replaced underneath feather, but
+// whose size and recorded checksum still say what they always said, has to
+// fail — because that is what silent corruption looks like from the outside.
+func TestGDriveVerifyReadsTheStoredBytes(t *testing.T) {
+	drive, destination := newFakeDrive(t)
+	ctx := context.Background()
+
+	const key = "feather/orders-00001.ndjson.gz"
+	body := "documents, compressed"
+
+	id, err := destination.Upload(ctx, key, strings.NewReader(body), int64(len(body)), Metadata{SHA256: sum(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	obj := StoredObject{Key: key, Handle: id, Size: int64(len(body)), SHA256: sum(body)}
+	if err := destination.Verify(ctx, obj); err != nil {
+		t.Fatalf("a good copy failed verification: %v", err)
+	}
+
+	// Same length, different bytes. Nothing about the size tells you.
+	drive.files[id].content = strings.Repeat("x", len(body))
+	if err := destination.Verify(ctx, obj); err == nil {
+		t.Fatal("verification passed a copy whose bytes had been replaced")
+	}
+}
+
+// Drive's query index lags writes, so a verification that finds the file by
+// name can miss one that is certainly there. The handle Upload returned is used
+// instead, and has to work even when a name search would find nothing.
+func TestGDriveVerifyUsesTheHandleNotTheName(t *testing.T) {
+	drive, destination := newFakeDrive(t)
+	ctx := context.Background()
+
+	const key = "feather/orders-00001.ndjson.gz"
+	body := "documents, compressed"
+
+	id, err := destination.Upload(ctx, key, strings.NewReader(body), int64(len(body)), Metadata{SHA256: sum(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for the lagging index: the file is there, but not findable by
+	// name. Verification by handle must be unaffected.
+	drive.files[id].name = "not-what-the-search-looks-for"
+
+	obj := StoredObject{Key: key, Handle: id, Size: int64(len(body)), SHA256: sum(body)}
+	if err := destination.Verify(ctx, obj); err != nil {
+		t.Fatalf("verification by handle failed: %v", err)
+	}
+
+	// Without the handle, the same copy is unfindable — which is exactly the
+	// spurious failure the handle exists to avoid.
+	obj.Handle = ""
+	if err := destination.Verify(ctx, obj); err == nil {
+		t.Error("a name search found a file whose name had changed")
 	}
 }
 
@@ -125,7 +200,7 @@ func TestGDriveReuploadReplacesTheFile(t *testing.T) {
 	if drive.files[second].content != "two" {
 		t.Errorf("the file holds %q", drive.files[second].content)
 	}
-	if err := destination.Verify(ctx, key, 3, sum("two")); err != nil {
+	if err := destination.Verify(ctx, StoredObject{Key: key, Handle: second, Size: 3, SHA256: sum("two")}); err != nil {
 		t.Fatalf("the replaced file does not verify: %v", err)
 	}
 }
@@ -227,7 +302,7 @@ func (f *fakeDrive) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPatch && strings.HasPrefix(path, "files/"):
 		f.write(w, r, strings.TrimPrefix(path, "files/"))
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "files/"):
-		f.get(w, strings.TrimPrefix(path, "files/"))
+		f.get(w, r, strings.TrimPrefix(path, "files/"))
 	default:
 		http.Error(w, `{"error":{"code":404,"message":"no such method"}}`, http.StatusNotFound)
 	}
@@ -277,12 +352,20 @@ func (f *fakeDrive) write(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, &drive.File{Id: file.id, Name: file.name, Size: int64(len(file.content))})
 }
 
-func (f *fakeDrive) get(w http.ResponseWriter, id string) {
+func (f *fakeDrive) get(w http.ResponseWriter, r *http.Request, id string) {
 	file, ok := f.files[id]
 	if !ok {
 		http.Error(w, `{"error":{"code":404,"message":"File not found"}}`, http.StatusNotFound)
 		return
 	}
+
+	// alt=media is the download: Drive returns the bytes, not the metadata.
+	if r.URL.Query().Get("alt") == "media" {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = io.WriteString(w, file.content)
+		return
+	}
+
 	out := &drive.File{
 		Id: file.id, Name: file.name, MimeType: file.mimeType,
 		Size: int64(len(file.content)), Sha256Checksum: sum(file.content),

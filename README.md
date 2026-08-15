@@ -120,7 +120,7 @@ that fail for different reasons.
 folders in the bucket, and real folders in Google Drive:
 
 ```
-archive/{db}/{collection}/{yyyy}-{MM}/{config}-{ts}-{seq}{ext}
+archive/{db}/{collection}/{yyyy}-{MM}/{config}-{runId}-{seq}{ext}
 ```
 
 | Variable | Becomes |
@@ -133,9 +133,17 @@ archive/{db}/{collection}/{yyyy}-{MM}/{config}-{ts}-{seq}{ext}
 | `{ts}` | full timestamp, e.g. `20260514T023000Z` |
 | `{ext}` | extension implied by the codec, e.g. `.ndjson.gz` |
 
-A template must contain `{runId}` or `{seq}` so two batches cannot overwrite
-each other, and an unknown variable is rejected when you save rather than
-written into an object key literally.
+A template **must contain `{runId}`**, and an unknown variable is rejected when
+you save rather than written into an object key literally.
+
+`{runId}` is required rather than merely recommended, and `{seq}` is not a
+substitute for it. `{seq}` distinguishes the batches within one run, but it
+repeats from `00001` on the next run — so a template built from `{seq}` alone
+renders the same keys every time, and the second run writes over the first
+run's objects. When deletion is on, those documents are already gone from
+MongoDB, and the archive that held the only copy of them has just been
+replaced. Including `{runId}` makes every run's keys unique, which is also why
+a retry after a failure leaves the previous attempt's objects intact.
 
 **After archiving** — the deletion switch. Off, documents are copied and left
 alone. On, once every destination has the file and each copy has been read back

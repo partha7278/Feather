@@ -201,6 +201,22 @@ func (c *JobConfig) Validate(known Catalog) error {
 			return fmt.Errorf("destination %q is not a configured backup account", alias)
 		}
 	}
+	return c.CheckSafeToRun()
+}
+
+// CheckSafeToRun holds the rules that must be true before this config is
+// allowed to write an archive, as opposed to merely be loaded and displayed.
+//
+// It is separate from Prepare because the two answer different questions.
+// Prepare asks "can feather make sense of this?", and is run against every
+// stored config at boot — so a rule added later must not make an existing
+// installation unbootable. CheckSafeToRun asks "would running this destroy
+// something?", and is applied on save and immediately before a run, where
+// refusing is cheap and the operator is there to read why.
+func (c *JobConfig) CheckSafeToRun() error {
+	if err := RequiresRunID(c.Output.KeyTemplate); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -271,9 +287,11 @@ func (c *JobConfig) Prepare() error {
 	if err := ValidateKeyTemplate(c.Output.KeyTemplate); err != nil {
 		return fmt.Errorf("output.keyTemplate: %w", err)
 	}
-	if !strings.Contains(c.Output.KeyTemplate, "{runId}") && !strings.Contains(c.Output.KeyTemplate, "{seq}") {
-		return fmt.Errorf("output.keyTemplate must contain {runId} or {seq} so batches do not overwrite each other")
-	}
+	// The {runId} requirement is deliberately not enforced here. Prepare runs on
+	// every stored config at every boot, and an installation that predates the
+	// rule would be unable to start. CheckSafeToRun applies it where it counts —
+	// on save, and before a run — so an existing config is loaded, listed and
+	// visibly flagged rather than taking the process down with it.
 
 	if err := c.Schedule.resolve(); err != nil {
 		return err

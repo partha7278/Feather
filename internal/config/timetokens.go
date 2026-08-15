@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -86,6 +87,11 @@ var KeyTemplateTokens = []KeyTemplateToken{
 // ValidateKeyTemplate rejects a template containing a token feather does not
 // know. Left unchecked, a typo like {colletion} would be written into the
 // object key literally and only be noticed months later.
+//
+// It also rejects templates whose shape would produce a key nobody meant: a
+// leading slash, a doubled slash, or a ".." segment. Object stores treat those
+// as ordinary characters and file the archive somewhere surprising; Google
+// Drive turns every segment into a real folder, so ".." would make one.
 func ValidateKeyTemplate(template string) error {
 	known := make(map[string]bool, len(KeyTemplateTokens))
 	for _, t := range KeyTemplateTokens {
@@ -101,6 +107,40 @@ func ValidateKeyTemplate(template string) error {
 			return fmt.Errorf("unknown variable %s in the file name template (supported: %s)",
 				found, strings.Join(supported, " "))
 		}
+	}
+
+	if strings.TrimSpace(template) == "" {
+		return errors.New("the file name template is empty")
+	}
+	if strings.HasPrefix(template, "/") {
+		return errors.New("the file name template must not start with a slash — keys are relative to the bucket or folder")
+	}
+	if strings.Contains(template, "//") {
+		return errors.New("the file name template contains an empty path segment (//)")
+	}
+	for _, segment := range strings.Split(template, "/") {
+		if segment == ".." || segment == "." {
+			return fmt.Errorf("the file name template contains a %q path segment", segment)
+		}
+	}
+	if strings.ContainsAny(template, "\\\x00") {
+		return errors.New("the file name template contains a backslash or a null byte — use / to separate folders")
+	}
+	return nil
+}
+
+// RequiresRunID reports the reason a template cannot be trusted to produce a
+// unique key on every run, or nil if it can.
+//
+// {runId} is mandatory, and {seq} is not a substitute for it. A template of
+// "archive/{collection}/{seq}{ext}" renders identically on every run: run 2
+// writes over run 1's objects. If run 1 deleted its documents from MongoDB —
+// which is the whole point of the tool — the only copy of them is what run 2
+// just overwrote. That is silent, total, unrecoverable loss of a batch, from a
+// config that reads perfectly sensibly.
+func RequiresRunID(template string) error {
+	if !strings.Contains(template, "{runId}") {
+		return errors.New("output.keyTemplate must contain {runId} so a later run cannot overwrite an earlier run's archive")
 	}
 	return nil
 }

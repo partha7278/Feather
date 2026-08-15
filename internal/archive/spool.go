@@ -115,7 +115,14 @@ func (s *Spool) Add(doc mongox.Document) error {
 
 	s.rawBytes += int64(written)
 	s.docCount++
-	s.ids = append(s.ids, doc.ID)
+	// Copied, not retained. doc.ID is a bson.RawValue whose Value field is a
+	// subslice of the document's own buffer, and Go cannot free a backing array
+	// while any subslice of it is reachable. Appending the value as it arrives
+	// therefore pins every document in the batch in memory for as long as the
+	// id list lives — turning a spool bounded by disk into one bounded by RAM,
+	// at up to batch.maxBytes per concurrent job. An _id is a few dozen bytes;
+	// the document it came in with can be megabytes.
+	s.ids = append(s.ids, copyRawValue(doc.ID))
 
 	idText := formatID(doc.ID)
 	if s.minID == "" {
@@ -248,6 +255,20 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 // formatID renders an _id for the catalogue. ObjectIds get their familiar hex
 // form; anything else falls back to Extended JSON so the value is unambiguous.
+// copyRawValue detaches a RawValue from the buffer it was read out of.
+//
+// bsoncore is zero-copy by design: LookupErr hands back a slice into the
+// document, which is exactly right for a value you use and drop. It is exactly
+// wrong for one you keep, because keeping it keeps the whole document.
+func copyRawValue(v bson.RawValue) bson.RawValue {
+	if len(v.Value) == 0 {
+		return v
+	}
+	value := make([]byte, len(v.Value))
+	copy(value, v.Value)
+	return bson.RawValue{Type: v.Type, Value: value}
+}
+
 func formatID(id bson.RawValue) string {
 	if oid, ok := id.ObjectIDOK(); ok {
 		return oid.Hex()

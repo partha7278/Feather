@@ -69,6 +69,15 @@ var ErrLocked = errors.New("another run of this config is already in progress")
 func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.TriggerKind) (*Outcome, error) {
 	log := r.log.With("config", job.Name, "collection", job.Source.Database+"."+job.Source.Collection)
 
+	// Checked before the lock and before anything is read: a config that would
+	// write over an earlier run's archive must not get as far as opening a
+	// cursor. This can only be reached by a config stored before the rule
+	// existed, since saving one has been refused since.
+	if err := job.CheckSafeToRun(); err != nil {
+		log.Error("refusing to run an unsafe config", "error", err)
+		return &Outcome{Status: store.RunFailed}, fmt.Errorf("config %s cannot be run: %w", job.Name, err)
+	}
+
 	lock, acquired, err := r.store.TryLockJob(ctx, job.Name)
 	if err != nil {
 		return nil, err
@@ -464,19 +473,25 @@ func (r *Runner) uploadOne(ctx context.Context, target dest.Destination, row *st
 	}
 	defer file.Close()
 
-	etag, err := target.Upload(ctx, row.ObjectKey, file, b.result.BytesCompressed, meta)
+	handle, err := target.Upload(ctx, row.ObjectKey, file, b.result.BytesCompressed, meta)
 	if err != nil {
 		return err
 	}
-	row.ETag = etag
-	if err := r.store.MarkDestinationUploaded(ctx, row.ID, etag, b.result.BytesCompressed); err != nil {
+	row.ETag = handle
+	if err := r.store.MarkDestinationUploaded(ctx, row.ID, handle, b.result.BytesCompressed); err != nil {
 		return err
 	}
 
 	if !verify {
 		return nil
 	}
-	if err := target.Verify(ctx, row.ObjectKey, b.result.BytesCompressed, b.result.SHA256); err != nil {
+	err = target.Verify(ctx, dest.StoredObject{
+		Key:    row.ObjectKey,
+		Handle: handle,
+		Size:   b.result.BytesCompressed,
+		SHA256: b.result.SHA256,
+	})
+	if err != nil {
 		return err
 	}
 	return r.store.MarkDestinationVerified(ctx, row.ID)
