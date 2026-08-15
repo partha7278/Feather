@@ -11,9 +11,11 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -30,17 +32,89 @@ type Server struct {
 	log       *slog.Logger
 	templates *templateSet
 	secure    bool
+
+	// trustedProxies are the networks whose forwarded-for headers are believed.
+	// Empty means none, and then only the socket address is ever used.
+	trustedProxies []netip.Prefix
 }
 
-// New builds the HTTP server. secureCookies marks session cookies Secure,
-// which is right whenever feather is reached over HTTPS — directly or through
-// a reverse proxy.
-func New(application *app.App, log *slog.Logger, secureCookies bool) (*Server, error) {
+// Options configures the server.
+type Options struct {
+	// SecureCookies marks session cookies Secure. Leave it nil to derive the
+	// answer from BaseURL, which is what an operator expects: a panel published
+	// over HTTPS should not need a second flag saying so.
+	SecureCookies *bool
+	// BaseURL is the externally visible URL, when feather is behind a proxy.
+	BaseURL string
+	// TrustedProxies is a comma-separated list of CIDRs or addresses whose
+	// X-Forwarded-For, Forwarded and X-Real-IP headers are believed.
+	TrustedProxies string
+}
+
+// New builds the HTTP server.
+func New(application *app.App, log *slog.Logger, opts Options) (*Server, error) {
 	templates, err := loadTemplates()
 	if err != nil {
 		return nil, err
 	}
-	return &Server{app: application, log: log, templates: templates, secure: secureCookies}, nil
+
+	// Secure cookies default to on whenever the panel is published over HTTPS.
+	// They used to default to off and need --secure-cookies, and the shipped
+	// systemd unit and Dockerfile both omitted it — so the documented
+	// deployment served session cookies without the Secure attribute over a
+	// connection that was, in fact, TLS.
+	secure := strings.HasPrefix(strings.ToLower(opts.BaseURL), "https://")
+	if opts.SecureCookies != nil {
+		secure = *opts.SecureCookies
+	}
+
+	proxies, err := parseTrustedProxies(opts.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
+	if len(proxies) > 0 {
+		log.Info("trusting forwarded-for headers from", "networks", opts.TrustedProxies)
+	}
+
+	return &Server{
+		app: application, log: log, templates: templates,
+		secure: secure, trustedProxies: proxies,
+	}, nil
+}
+
+// parseTrustedProxies accepts CIDRs and bare addresses, plus the shorthands
+// "local" (loopback, where a proxy on the same host connects from) and
+// "private" (the RFC 1918 and unique-local ranges, for a proxy in the same
+// Docker network or VPC).
+func parseTrustedProxies(raw string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		switch strings.ToLower(entry) {
+		case "local", "loopback":
+			out = append(out, netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128"))
+			continue
+		case "private":
+			for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"} {
+				out = append(out, netip.MustParsePrefix(cidr))
+			}
+			continue
+		}
+
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			out = append(out, prefix)
+			continue
+		}
+		addr, err := netip.ParseAddr(entry)
+		if err != nil {
+			return nil, fmt.Errorf("trusted proxy %q is not an IP address or CIDR block", entry)
+		}
+		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return out, nil
 }
 
 // Handler builds the routing table.
@@ -91,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /backups", s.guard(s.handleBackups))
 	mux.HandleFunc("GET /runs", s.guard(s.handleRuns))
+	mux.HandleFunc("GET /audit", s.guard(s.handleAudit))
 	mux.HandleFunc("GET /runs/{id}", s.guard(s.handleRunDetail))
 
 	mux.HandleFunc("GET /settings", s.guard(s.handleSettings))
@@ -103,7 +178,77 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/collections", s.guard(s.handleAPICollections))
 
-	return s.recoverPanics(s.logRequests(s.setupGate(mux)))
+	return s.recoverPanics(s.securityHeaders(s.limitRequestBody(s.logRequests(s.setupGate(mux)))))
+}
+
+// maxFormBytes bounds an ordinary form post. The largest legitimate one is a
+// retention config carrying a filter and a projection, which is kilobytes; a
+// megabyte is generous. The bundle import has its own, larger limit applied at
+// its route, and is the only thing that needs one.
+const maxFormBytes = 1 << 20
+
+// limitRequestBody caps how much feather will read from a request.
+//
+// Only /settings/import was capped before, so every other POST could stream as
+// much as it liked for the full two-minute read timeout — into a process that
+// is also running the archives. ParseForm buffers what it reads.
+func (s *Server) limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The bundle route sets its own, larger limit; applying this one first
+		// would override it, since MaxBytesReader does not nest.
+		if r.URL.Path == "/settings/import" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeaders applies the response headers to everything.
+//
+// They used to be set inside render(), which meant they were on rendered pages
+// and nowhere else: not on http.Error responses, not on the panic handler, not
+// on the 405s the mux produces for a POST-only route, not on /healthz, and not
+// on /static. A CSP that covers the pages but not the error pages is a CSP with
+// a hole in it, and the hole is exactly where injected content would land.
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("X-Content-Type-Options", "nosniff")
+		header.Set("Referrer-Policy", "same-origin")
+		// frame-ancestors is the modern control; X-Frame-Options is kept for
+		// the scanners and proxies that only know the old one.
+		header.Set("X-Frame-Options", "DENY")
+		header.Set("Cross-Origin-Opener-Policy", "same-origin")
+		header.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=(), usb=()")
+		// The panel serves only its own embedded assets.
+		header.Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; "+
+				"object-src 'none'")
+
+		// Only over HTTPS, and only when feather knows it is: promising HSTS on
+		// a plain-HTTP deployment locks a browser out of a panel that has no
+		// TLS to fall back on.
+		if s.secure {
+			header.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		// Embedded assets are content-addressed by release, not by URL, so a
+		// long cache would serve last version's CSS after an upgrade. An hour
+		// is enough to stop the refetch-per-page-load that no headers at all
+		// produced, and short enough that an upgrade settles quickly.
+		if strings.HasPrefix(r.URL.Path, "/static/") {
+			header.Set("Cache-Control", "public, max-age=3600")
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Serve runs the HTTP server until the context is cancelled.
@@ -183,7 +328,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 
 		s.log.Debug("http",
 			"method", r.Method, "path", r.URL.Path, "status", recorder.status,
-			"duration", time.Since(started).Round(time.Millisecond), "ip", clientIP(r))
+			"duration", time.Since(started).Round(time.Millisecond), "ip", s.clientIP(r))
 	})
 }
 
@@ -211,20 +356,91 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
-func clientIP(r *http.Request) string {
-	// A reverse proxy is the normal deployment, so trust its header when there
-	// is one; feather binds to localhost by default.
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if first, _, found := strings.Cut(forwarded, ","); found {
-			return strings.TrimSpace(first)
-		}
-		return strings.TrimSpace(forwarded)
+// clientIP is the address of whoever made this request, as far as it can be
+// established.
+//
+// The forwarded headers are only read when the immediate peer is a trusted
+// proxy. They used to be read unconditionally, which meant anything downstream
+// could claim any address: the login throttle keyed on it, so a random value
+// per request bypassed it entirely, and the addresses in the log were whatever
+// the client felt like writing.
+//
+// With no trusted proxies configured, only the socket address is used. That is
+// the correct default: feather binds to localhost, and an operator putting it
+// behind a proxy is the one who knows the proxy's address.
+func (s *Server) clientIP(r *http.Request) string {
+	peer := peerIP(r)
+	if !s.trustsPeer(peer) {
+		return peer
 	}
+
+	// Forwarded (RFC 7239) first, then the de-facto X-Forwarded-For. The
+	// left-most entry is the original client; entries to its right were added
+	// by successive proxies.
+	if forwarded := r.Header.Get("Forwarded"); forwarded != "" {
+		if first, _, _ := strings.Cut(forwarded, ","); first != "" {
+			for _, part := range strings.Split(first, ";") {
+				key, value, found := strings.Cut(strings.TrimSpace(part), "=")
+				if found && strings.EqualFold(key, "for") {
+					if addr := normaliseForwardedFor(value); addr != "" {
+						return addr
+					}
+				}
+			}
+		}
+	}
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		first, _, _ := strings.Cut(forwarded, ",")
+		if addr := strings.TrimSpace(first); addr != "" {
+			return addr
+		}
+	}
+	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
+		return real
+	}
+	return peer
+}
+
+// trustsProxy reports whether this request came through a proxy feather has
+// been told to believe. Used for logging, so an operator can tell whether the
+// address in a line is authoritative.
+func (s *Server) trustsProxy(r *http.Request) bool { return s.trustsPeer(peerIP(r)) }
+
+func (s *Server) trustsPeer(peer string) bool {
+	if len(s.trustedProxies) == 0 {
+		return false
+	}
+	addr, err := netip.ParseAddr(peer)
+	if err != nil {
+		return false
+	}
+	for _, network := range s.trustedProxies {
+		if network.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// normaliseForwardedFor unwraps the quoting and bracketing RFC 7239 allows:
+// for="[2001:db8::1]:443", for=192.0.2.60:1234, for="_hidden".
+func normaliseForwardedFor(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), `"`)
+	if value == "" || strings.HasPrefix(value, "_") || value == "unknown" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	return strings.Trim(value, "[]")
 }
 
 // reload pushes freshly saved settings into the running scheduler and clients.

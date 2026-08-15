@@ -26,6 +26,9 @@
     <a class="nav-link {{if eq .Nav "runs"}}active{{end}}" href="/runs">
       {{template "icon-activity"}} Runs
     </a>
+    <a class="nav-link {{if eq .Nav "audit"}}active{{end}}" href="/audit">
+      {{template "icon-shield"}} Activity
+    </a>
 
     <div class="nav-group">Accounts</div>
     <a class="nav-link {{if eq .Nav "mongo"}}active{{end}}" href="/mongo">

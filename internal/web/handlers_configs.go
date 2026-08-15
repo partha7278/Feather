@@ -1,8 +1,10 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -140,6 +142,7 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.audit(r, store.AuditConfigSaved, "config", job.Name, auditConfigDetail(job))
 	if job.Retention.DeleteAfterArchive {
 		s.setFlash(w, "ok", "Saved %q. Documents will be deleted from MongoDB once every copy is stored and verified.", job.Name)
 	} else {
@@ -236,6 +239,17 @@ func jobFromForm(f *form) (*config.JobConfig, error) {
 	return job, nil
 }
 
+// auditConfigDetail summarises the parts of a saved config that decide whether
+// it destroys data, so the trail is readable without opening the config.
+func auditConfigDetail(job *config.JobConfig) string {
+	retention := "archive only"
+	if job.Retention.DeleteAfterArchive {
+		retention = "DELETES from MongoDB after archiving"
+	}
+	return fmt.Sprintf("%s.%s -> %v; %s", job.Source.Database, job.Source.Collection,
+		job.Destinations, retention)
+}
+
 func (s *Server) handleConfigEnabled(w http.ResponseWriter, r *http.Request) {
 	enabled := r.PostFormValue("enabled") == "on" || r.PostFormValue("enabled") == "true"
 	if err := s.app.Store.SetJobEnabled(r.Context(), r.PathValue("id"), enabled); err != nil {
@@ -245,6 +259,12 @@ func (s *Server) handleConfigEnabled(w http.ResponseWriter, r *http.Request) {
 	if err := s.reload(r); err != nil {
 		s.log.Warn("could not reload after enable/disable", "error", err)
 	}
+
+	action := store.AuditConfigDisabled
+	if enabled {
+		action = store.AuditConfigEnabled
+	}
+	s.audit(r, action, "config", r.PathValue("id"), "")
 
 	if enabled {
 		s.setFlash(w, "ok", "Config resumed — it will run on its schedule again.")
@@ -260,20 +280,37 @@ func (s *Server) handleConfigEnabled(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfigDeletion(w http.ResponseWriter, r *http.Request) {
 	record, err := s.app.Store.JobByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.serverError(w, r, err)
+		s.notFoundOrError(w, r, err)
 		return
 	}
 
 	deleteAfter := r.PostFormValue("deleteAfterArchive") == "on" || r.PostFormValue("deleteAfterArchive") == "true"
 	if err := s.app.Store.SetJobDeleteAfterArchive(r.Context(), record.ID, deleteAfter); err != nil {
-		s.serverError(w, r, err)
+		// The store validates the resulting config rather than writing it
+		// blind. A config with an empty filter and deletion off is perfectly
+		// legal to save; turning deletion on makes it "archive the collection,
+		// then empty it", which Prepare refuses — and before the store checked,
+		// this one click both armed that and wrote a row that Prepare rejects,
+		// which parked the config.
+		s.setFlash(w, "error", "%s", err.Error())
+		s.redirectBack(w, r, "/configs")
 		return
 	}
 	if err := s.reload(r); err != nil {
-		s.log.Warn("could not reload after deletion toggle", "error", err)
+		s.setFlash(w, "error", "Saved, but the running scheduler could not be reloaded: %s", err.Error())
+		s.redirectBack(w, r, "/configs")
+		return
 	}
 
-	s.log.Warn("deletion setting changed", "config", record.Config.Name, "delete_after_archive", deleteAfter)
+	action, detail := store.AuditDeletionDisabled, "archive only; nothing is deleted from MongoDB"
+	if deleteAfter {
+		action, detail = store.AuditDeletionEnabled, "documents will be deleted from MongoDB after every copy is stored and verified"
+	}
+	s.log.Warn("deletion setting changed",
+		"config", record.Config.Name, "delete_after_archive", deleteAfter,
+		"user", currentUserEmail(r), "ip", s.clientIP(r))
+	s.audit(r, action, "config", record.Config.Name, detail)
+
 	if deleteAfter {
 		s.setFlash(w, "info", "%s will now DELETE documents from MongoDB after every copy is stored and verified.", record.Config.Name)
 	} else {
@@ -285,7 +322,7 @@ func (s *Server) handleConfigDeletion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfigRun(w http.ResponseWriter, r *http.Request) {
 	record, err := s.app.Store.JobByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.serverError(w, r, err)
+		s.notFoundOrError(w, r, err)
 		return
 	}
 
@@ -304,6 +341,11 @@ func (s *Server) handleConfigRun(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Info("run started from the control panel",
 		"config", record.Config.Name, "dry_run", dryRun, "user", currentUserEmail(r))
+	detail := "live run"
+	if dryRun {
+		detail = "dry run — reads and compresses only"
+	}
+	s.audit(r, store.AuditRunStarted, "config", record.Config.Name, detail)
 	if dryRun {
 		s.setFlash(w, "ok", "Dry run of %q started. It reads and compresses everything but uploads and deletes nothing.", record.Config.Name)
 	} else {
@@ -317,7 +359,7 @@ func (s *Server) handleConfigRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfigPreview(w http.ResponseWriter, r *http.Request) {
 	record, err := s.app.Store.JobByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.serverError(w, r, err)
+		s.notFoundOrError(w, r, err)
 		return
 	}
 	job := record.Config
@@ -335,22 +377,36 @@ func (s *Server) handleConfigPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := s.app.Mongo.Get(r.Context(), job.Source.MongoSource)
+	// Counting an unindexed filter over a large collection is unbounded work,
+	// and this handler had no deadline — so one click could hold a request slot
+	// for the full two-minute write timeout. handleAPICollections already caps
+	// itself at 15s; this is the same bound, a little more generous because a
+	// count legitimately takes longer than a listing.
+	ctx, cancel := contextWithTimeout(r, 30*time.Second)
+	defer cancel()
+
+	client, err := s.app.Mongo.Get(ctx, job.Source.MongoSource)
 	if err != nil {
-		s.setFlash(w, "error", "%s", err.Error())
+		s.setFlash(w, "error", "%s", config.RedactSecretsFromError(err))
 		s.redirectBack(w, r, configFormPath(record.ID))
 		return
 	}
 	collection, err := client.Collection(job.Source.Database, job.Source.Collection, job.Source.ReadPreference)
 	if err != nil {
-		s.setFlash(w, "error", "%s", err.Error())
+		s.setFlash(w, "error", "%s", config.RedactSecretsFromError(err))
 		s.redirectBack(w, r, configFormPath(record.ID))
 		return
 	}
 
-	matching, err := mongox.Count(r.Context(), collection, filter)
+	matching, err := mongox.Count(ctx, collection, filter)
 	if err != nil {
-		s.setFlash(w, "error", "Counting matching documents: %s", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.setFlash(w, "error", "Counting matching documents took longer than 30 seconds. "+
+				"That usually means the filter has no index behind it — the run itself will still work, but it will be slow.")
+			s.redirectBack(w, r, configFormPath(record.ID))
+			return
+		}
+		s.setFlash(w, "error", "Counting matching documents: %s", config.RedactSecretsFromError(err))
 		s.redirectBack(w, r, configFormPath(record.ID))
 		return
 	}
@@ -368,7 +424,7 @@ func (s *Server) handleConfigPreview(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfigDelete(w http.ResponseWriter, r *http.Request) {
 	record, err := s.app.Store.JobByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.serverError(w, r, err)
+		s.notFoundOrError(w, r, err)
 		return
 	}
 	if err := s.app.Store.DeleteJob(r.Context(), record.ID); err != nil {
@@ -379,6 +435,8 @@ func (s *Server) handleConfigDelete(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("could not reload after config removal", "error", err)
 	}
 
+	s.audit(r, store.AuditConfigDeleted, "config", record.Config.Name,
+		"archives and run history kept")
 	s.setFlash(w, "ok", "Removed the config %q. Its archives and run history are kept.", record.Config.Name)
 	http.Redirect(w, r, "/configs", http.StatusSeeOther)
 }

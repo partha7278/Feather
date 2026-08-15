@@ -266,12 +266,52 @@ func (a *App) Housekeeping(ctx context.Context) {
 	} else if failed > 0 {
 		a.Log.Warn("closed run rows left open by a previous process", "count", failed)
 	}
+	a.purge(ctx)
+}
+
+// AuditRetention is how long the activity trail is kept. Long enough to answer
+// "what happened last quarter?", bounded so a years-old installation does not
+// carry every click it has ever seen.
+const AuditRetention = 365 * 24 * time.Hour
+
+// purge drops what has aged out. Called at startup and then on a timer — doing
+// it only at startup meant a process that stayed up for months never pruned
+// anything, which is precisely the process that most needed to.
+func (a *App) purge(ctx context.Context) {
 	if purged, err := a.Store.PurgeExpiredSessions(ctx); err != nil {
 		a.Log.Warn("could not purge expired sessions", "error", err)
 	} else if purged > 0 {
 		a.Log.Debug("purged expired sessions", "count", purged)
 	}
+	if purged, err := a.Store.PurgeAuditBefore(ctx, time.Now().Add(-AuditRetention)); err != nil {
+		a.Log.Warn("could not purge old audit events", "error", err)
+	} else if purged > 0 {
+		a.Log.Info("purged audit events older than a year", "count", purged)
+	}
 }
+
+// StartHousekeeping runs the periodic cleanup until ctx is done.
+func (a *App) StartHousekeeping(ctx context.Context) {
+	a.inFlight.Add(1)
+	go func() {
+		defer a.inFlight.Done()
+
+		ticker := time.NewTicker(housekeepingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.purge(a.baseCtx)
+			}
+		}
+	}()
+}
+
+// housekeepingInterval is deliberately slow: none of this is urgent, and every
+// tick takes the single SQLite connection for a moment.
+const housekeepingInterval = 6 * time.Hour
 
 // Close shuts everything down, waiting for in-flight runs first.
 //

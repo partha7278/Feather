@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -100,11 +101,13 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "same-origin")
-	// The panel serves only its own embedded assets.
-	w.Header().Set("Content-Security-Policy",
-		"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	// Pages show redacted connection strings, bucket names, admin emails and run
+	// history. Without this they sit in the browser cache and come back on the
+	// back button after a sign-out.
+	w.Header().Set("Cache-Control", "no-store, private")
+	// The security headers themselves are set by securityHeaders for every
+	// response, not just this one — a 500, a 404 or a static asset needs them
+	// just as much, and previously none of them had any.
 	_, _ = buffer.WriteTo(w)
 }
 
@@ -115,6 +118,21 @@ func (s *Server) serverError(w http.ResponseWriter, r *http.Request, err error) 
 
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Not found.", http.StatusNotFound)
+}
+
+// notFoundOrError picks the status an id lookup deserves.
+//
+// The POST action handlers all called serverError unconditionally, so a stale
+// link to a config someone else deleted produced a 500 and a log line reading
+// "request failed" — as if feather were broken rather than the row being gone.
+// A 404 is both the truthful answer and the one that stops a monitored error
+// rate rising every time a bookmark goes stale.
+func (s *Server) notFoundOrError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		s.notFound(w, r)
+		return
+	}
+	s.serverError(w, r, err)
 }
 
 // --- flash messages --------------------------------------------------------
@@ -163,6 +181,7 @@ var templateFuncs = template.FuncMap{
 	"duration":    humanDuration,
 	"yesNo":       func(v bool) string { return map[bool]string{true: "yes", false: "no"}[v] },
 	"statusTone":  statusTone,
+	"auditLabel":  auditLabel,
 	"prettyJSON":  prettyJSON,
 	"compactJSON": compactJSON,
 	"truncate":    truncateText,

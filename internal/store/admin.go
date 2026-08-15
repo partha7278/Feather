@@ -121,7 +121,17 @@ func (s *Store) Authenticate(ctx context.Context, email, password string) (Admin
 }
 
 // ChangePassword re-hashes an administrator's password after checking the
-// current one, and drops every other session that account has open.
+// current one, and drops every session that account has open — including,
+// deliberately, the one making the request.
+//
+// The comment here used to say it did that; the code did not. Someone who
+// changes their password because they think their session was stolen expects
+// the thief to be logged out, and instead the stolen session stayed valid for
+// up to twelve hours. Signing the caller out too is the honest version of that
+// promise: there is no way to tell "this session" from "the attacker's session"
+// after the fact, and re-entering a password just chosen is a small price.
+//
+// The caller is expected to redirect to the login page afterwards.
 func (s *Store) ChangePassword(ctx context.Context, userID, current, next string) error {
 	user, err := s.AdminByID(ctx, userID)
 	if err != nil {
@@ -133,14 +143,29 @@ func (s *Store) ChangePassword(ctx context.Context, userID, current, next string
 	if err := CheckPasswordStrength(next); err != nil {
 		return err
 	}
+	if current == next {
+		return errors.New("the new password is the same as the current one")
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(next), bcryptCost)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx,
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE admin_users SET password_hash = ?, updated_at = ? WHERE id = ?`,
-		string(hash), nowText(), userID)
-	return err
+		string(hash), nowText(), userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM admin_sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ListAdmins returns every administrator, by email.
@@ -196,8 +221,23 @@ func (s *Store) DeleteAdmin(ctx context.Context, id string) error {
 	if count <= 1 {
 		return errors.New("this is the only administrator — create another one before removing it")
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM admin_users WHERE id = ?`, id)
-	return err
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM admin_users WHERE id = ?`, id); err != nil {
+		return err
+	}
+	// Their open sessions go with them. The guard already refuses a session
+	// whose user has vanished, so this is housekeeping rather than a hole —
+	// but rows that nothing will ever clean up are their own kind of problem.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM admin_sessions WHERE user_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ResetPassword sets a password without knowing the old one. Reachable only

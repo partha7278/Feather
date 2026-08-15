@@ -64,6 +64,7 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 
 	// The concurrency cap is fixed when the scheduler is built, so it is the one
 	// setting here that genuinely needs a restart.
+	s.audit(r, store.AuditSettingsSaved, "instance", "", "")
 	s.setFlash(w, "ok", "Settings saved. A change to concurrent jobs takes effect when feather restarts.")
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
@@ -94,9 +95,16 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.log.Info("password changed", "email", user.Email)
-	s.setFlash(w, "ok", "Password changed.")
-	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+	s.log.Info("password changed", "email", user.Email, "ip", s.clientIP(r))
+	s.audit(r, store.AuditPasswordChanged, "admin", user.Email, "")
+
+	// Changing a password invalidates every session that account has, this one
+	// included — the point of doing it is usually that one of them might not be
+	// yours. Clear the cookie so the next request is a clean login rather than
+	// a bounce off the guard.
+	s.clearSessionCookie(w)
+	s.setFlash(w, "ok", "Password changed. Every session for this account was signed out, including this one — please sign in again.")
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (s *Server) handleAdminCreate(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +130,7 @@ func (s *Server) handleAdminCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.log.Info("administrator added", "email", user.Email, "by", currentUserEmail(r))
+	s.audit(r, store.AuditAdminCreated, "admin", user.Email, "")
 	s.setFlash(w, "ok", "Added %s as an administrator.", user.Email)
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
@@ -141,6 +150,7 @@ func (s *Server) handleAdminDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.audit(r, store.AuditAdminDeleted, "admin", id, "")
 	s.log.Info("administrator removed", "id", id, "by", user.Email)
 	s.setFlash(w, "ok", "Administrator removed.")
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)

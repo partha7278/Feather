@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,10 +54,7 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 
 		if r.Method == http.MethodPost {
 			if !validCSRF(r, session.CSRFToken) {
-				// Almost always a stale tab rather than an attack, so say so
-				// plainly instead of showing a bare 403.
-				s.setFlash(w, "error", "That form had expired. Please try again.")
-				http.Redirect(w, r, r.URL.Path, http.StatusSeeOther)
+				s.csrfFailed(w, r)
 				return
 			}
 		}
@@ -73,6 +71,42 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// csrfFailed answers a POST whose token did not match.
+//
+// It used to redirect 303 to the same path with a flash. That reads well and
+// works for the handful of routes with a GET form at the same address — but
+// most mutating routes are POST-only, and a 303 turns the request into a GET
+// the mux has no handler for. The operator got a bare "405 Method Not Allowed"
+// and the friendly explanation was discarded with the response.
+//
+// A rendered 403 says the same thing on every route.
+func (s *Server) csrfFailed(w http.ResponseWriter, r *http.Request) {
+	s.log.Warn("rejected a POST with a bad or missing CSRF token",
+		"path", r.URL.Path, "ip", s.clientIP(r), "user", currentUserEmail(r))
+
+	w.WriteHeader(http.StatusForbidden)
+	s.render(w, r, "error", pageData{
+		Title: "That form had expired",
+		Data: map[string]any{
+			"Heading": "That form had expired",
+			"Message": "This usually means the page was left open for a long time, or you signed in " +
+				"again in another tab. Nothing was changed. Go back, reload the page, and try again.",
+			"Back": backLink(r),
+		},
+	})
+}
+
+// backLink is somewhere sensible to send someone after an error, preferring
+// where they came from when that was this site.
+func backLink(r *http.Request) string {
+	if referer := r.Referer(); referer != "" {
+		if path, err := parseSameSite(referer, r); err == nil && path != "" {
+			return path
+		}
+	}
+	return "/"
+}
+
 func sessionFrom(r *http.Request) (store.Session, store.AdminUser, bool) {
 	value, ok := r.Context().Value(sessionContextKey).(sessionContext)
 	if !ok {
@@ -85,7 +119,7 @@ func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	target := "/login"
 	// Bounce back to where they were headed, but only within this site.
 	if r.Method == http.MethodGet && r.URL.Path != "/" {
-		target += "?next=" + urlEscape(r.URL.RequestURI())
+		target += "?next=" + url.QueryEscape(r.URL.RequestURI())
 	}
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
@@ -175,14 +209,117 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// loginThrottle slows down repeated failures from one address. It is a
-// deterrent, not a defence — feather binds to localhost by default and expects
-// a reverse proxy in front of it.
-var loginThrottle = struct {
-	sync.Mutex
-	failures map[string]int
-	until    map[string]time.Time
-}{failures: map[string]int{}, until: map[string]time.Time{}}
+// loginThrottle slows down repeated failed sign-ins.
+//
+// Two things are tracked, and the second is the one that matters. Per-IP is the
+// obvious key and the weak one: the address comes from a header when feather
+// sits behind a proxy, so an attacker who can set it gets a fresh bucket per
+// request. Per-account cannot be sidestepped that way — whoever is guessing has
+// to name the account they are guessing at.
+//
+// Both maps are bounded. Unbounded, a spoofed address per request grew them
+// without limit, inside the same process that runs the archives.
+var loginThrottle = newThrottle()
+
+const (
+	throttleAfter    = 5
+	throttleCooldown = 5 * time.Minute
+	// throttleMaxKeys bounds memory. Reaching it means either a very busy panel
+	// or someone cycling keys; evicting the oldest entries is right in both
+	// cases, since the entries being evicted are the least recently active.
+	throttleMaxKeys = 4096
+)
+
+type throttle struct {
+	mu      sync.Mutex
+	entries map[string]*throttleEntry
+}
+
+type throttleEntry struct {
+	failures int
+	until    time.Time
+	seen     time.Time
+}
+
+func newThrottle() *throttle {
+	return &throttle{entries: map[string]*throttleEntry{}}
+}
+
+// blocked reports how long this key must wait, if at all.
+func (t *throttle) blocked(key string) (time.Duration, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	entry, ok := t.entries[key]
+	if !ok || time.Now().After(entry.until) {
+		return 0, false
+	}
+	return time.Until(entry.until), true
+}
+
+// fail records one failed attempt and starts a cooldown once there have been
+// enough of them.
+func (t *throttle) fail(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.evictLocked()
+	entry, ok := t.entries[key]
+	if !ok {
+		entry = &throttleEntry{}
+		t.entries[key] = entry
+	}
+	entry.seen = time.Now()
+	entry.failures++
+	if entry.failures >= throttleAfter {
+		entry.until = time.Now().Add(throttleCooldown)
+		entry.failures = 0
+	}
+}
+
+// succeed clears a key after a successful sign-in.
+func (t *throttle) succeed(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.entries, key)
+}
+
+// evictLocked drops expired entries, and if that is not enough, the least
+// recently seen ones. The caller holds the lock.
+func (t *throttle) evictLocked() {
+	if len(t.entries) < throttleMaxKeys {
+		return
+	}
+
+	now := time.Now()
+	for key, entry := range t.entries {
+		// An entry with no live cooldown and no recent activity is finished
+		// with; the cooldown window is how long it could still matter.
+		if now.After(entry.until) && now.Sub(entry.seen) > throttleCooldown {
+			delete(t.entries, key)
+		}
+	}
+	if len(t.entries) < throttleMaxKeys {
+		return
+	}
+
+	// Still full: drop the oldest half rather than scanning on every failure.
+	oldest := make([]string, 0, len(t.entries))
+	for key := range t.entries {
+		oldest = append(oldest, key)
+	}
+	sort.Slice(oldest, func(i, j int) bool {
+		return t.entries[oldest[i]].seen.Before(t.entries[oldest[j]].seen)
+	})
+	for _, key := range oldest[:len(oldest)/2] {
+		delete(t.entries, key)
+	}
+}
+
+// throttleKeys are the two buckets one sign-in attempt counts against.
+func throttleKeys(ip, email string) (ipKey, accountKey string) {
+	return "ip:" + ip, "account:" + strings.ToLower(strings.TrimSpace(email))
+}
 
 func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -198,9 +335,17 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	email := strings.TrimSpace(r.PostFormValue("email"))
 	password := r.PostFormValue("password")
 	next := safeNext(r.PostFormValue("next"))
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 
-	if wait, blocked := throttleCheck(ip); blocked {
+	ipKey, accountKey := throttleKeys(ip, email)
+	for _, key := range []string{ipKey, accountKey} {
+		wait, blocked := loginThrottle.blocked(key)
+		if !blocked {
+			continue
+		}
+		// The same message either way. Saying "this account is locked" would
+		// confirm the account exists, which is the one thing the login page is
+		// careful not to reveal anywhere else.
 		s.render(w, r, "login", pageData{
 			Title: "Sign in",
 			Nav:   "login",
@@ -216,8 +361,9 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 			s.serverError(w, r, err)
 			return
 		}
-		throttleFailure(ip)
-		s.log.Warn("failed login", "email", email, "ip", ip)
+		loginThrottle.fail(ipKey)
+		loginThrottle.fail(accountKey)
+		s.log.Warn("failed login", "email", email, "ip", ip, "ip_trusted", s.trustsProxy(r))
 		s.render(w, r, "login", pageData{
 			Title: "Sign in",
 			Nav:   "login",
@@ -227,7 +373,8 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	throttleReset(ip)
+	loginThrottle.succeed(ipKey)
+	loginThrottle.succeed(accountKey)
 	if err := s.startSession(w, r, user); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -251,7 +398,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, user store.AdminUser) error {
-	token, session, err := s.app.Store.CreateSession(r.Context(), user.ID, r.UserAgent(), clientIP(r))
+	token, session, err := s.app.Store.CreateSession(r.Context(), user.ID, r.UserAgent(), s.clientIP(r))
 	if err != nil {
 		return err
 	}
@@ -323,54 +470,38 @@ func validPreSessionCSRF(r *http.Request) bool {
 	return validCSRF(r, cookie.Value)
 }
 
-// --- login throttling ------------------------------------------------------
-
-const (
-	throttleAfter    = 5
-	throttleCooldown = 5 * time.Minute
-)
-
-func throttleCheck(ip string) (time.Duration, bool) {
-	loginThrottle.Lock()
-	defer loginThrottle.Unlock()
-
-	until, ok := loginThrottle.until[ip]
-	if !ok || time.Now().After(until) {
-		return 0, false
-	}
-	return time.Until(until), true
-}
-
-func throttleFailure(ip string) {
-	loginThrottle.Lock()
-	defer loginThrottle.Unlock()
-
-	loginThrottle.failures[ip]++
-	if loginThrottle.failures[ip] >= throttleAfter {
-		loginThrottle.until[ip] = time.Now().Add(throttleCooldown)
-		loginThrottle.failures[ip] = 0
-	}
-}
-
-func throttleReset(ip string) {
-	loginThrottle.Lock()
-	defer loginThrottle.Unlock()
-
-	delete(loginThrottle.failures, ip)
-	delete(loginThrottle.until, ip)
-}
-
 // safeNext keeps the post-login redirect on this site: an open redirect here
 // would turn the login page into a phishing hop.
+//
+// The prefix checks it used to do were not enough. "/\evil.com" starts with "/"
+// and not "//", so it passed — and browsers normalise the backslash to a slash,
+// making it the protocol-relative "//evil.com" the check was meant to catch.
+// Parsing and requiring the result to name no scheme and no host is the check
+// that actually holds, because it asks the question directly.
 func safeNext(raw string) string {
-	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+	if raw == "" || !strings.HasPrefix(raw, "/") {
 		return ""
 	}
-	return raw
-}
-
-func urlEscape(raw string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(raw, "&", "%26"), "?", "%3F")
+	// url.Parse is permissive about backslashes; browsers are not, so reject
+	// them rather than reasoning about who normalises what.
+	if strings.ContainsAny(raw, `\`) {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.Opaque != "" {
+		return ""
+	}
+	// Both forms have to look like a path on this site. Browsers do not decode
+	// %2F before resolving a Location, so "/%2F%2Fevil.com" is same-origin to
+	// them — but some proxies normalise it on the way through, and then it is
+	// "//evil.com". Checking the decoded form too costs nothing and removes the
+	// need to be right about which intermediary does what.
+	for _, path := range []string{parsed.EscapedPath(), parsed.Path} {
+		if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+			return ""
+		}
+	}
+	return parsed.RequestURI()
 }
 
 // parseSameSite accepts a referer only if it points back at this installation,

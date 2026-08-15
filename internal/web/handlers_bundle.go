@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/unifers/feather/internal/bundle"
+	"github.com/unifers/feather/internal/store"
 )
 
 // maxBundleBytes bounds an uploaded bundle. A large installation is a few
@@ -56,6 +57,11 @@ func (s *Server) handleSettingsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	detail := "with credentials, sealed under a passphrase"
+	if !exported.HasSecrets() {
+		detail = "without credentials"
+	}
+	s.audit(r, store.AuditBundleExported, "instance", "", detail)
 	s.log.Info("configuration exported",
 		"by", currentUserEmail(r),
 		"with_credentials", exported.HasSecrets(),
@@ -122,6 +128,7 @@ func (s *Server) handleSettingsImport(w http.ResponseWriter, r *http.Request) {
 	if err := s.reload(r); err != nil {
 		s.log.Warn("imported, but could not reload configuration", "error", err)
 	}
+	s.audit(r, store.AuditBundleImported, "instance", "", result.Summary())
 	s.log.Info("configuration imported",
 		"by", currentUserEmail(r), "file", header.Filename,
 		"overwrite", f.Bool("overwrite"), "summary", result.Summary(), "notes", result.Notes)

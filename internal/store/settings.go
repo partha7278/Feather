@@ -167,9 +167,12 @@ func (s *Store) DeleteMongoSource(ctx context.Context, id string) error {
 
 // RecordMongoCheck stores the outcome of a connectivity test.
 func (s *Store) RecordMongoCheck(ctx context.Context, id string, checkErr error) error {
+	// Redacted before it is stored, not just before it is shown. This string is
+	// rendered on the accounts list, and the MongoDB driver's URI parse errors
+	// quote the connection string back verbatim — password included.
 	message := ""
 	if checkErr != nil {
-		message = truncate(checkErr.Error(), 2000)
+		message = truncate(config.RedactSecretsFromError(checkErr), 2000)
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE mongo_sources SET last_checked_at = ?, last_check_ok = ?, last_check_error = NULLIF(?, '')
@@ -425,9 +428,12 @@ func (s *Store) ClearDriveAuthorisation(ctx context.Context, id string) error {
 
 // RecordDestinationCheck stores the outcome of a reachability test.
 func (s *Store) RecordDestinationCheck(ctx context.Context, id string, checkErr error) error {
+	// Redacted before it is stored, not just before it is shown. This string is
+	// rendered on the accounts list, and the MongoDB driver's URI parse errors
+	// quote the connection string back verbatim — password included.
 	message := ""
 	if checkErr != nil {
-		message = truncate(checkErr.Error(), 2000)
+		message = truncate(config.RedactSecretsFromError(checkErr), 2000)
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE destinations SET last_checked_at = ?, last_check_ok = ?, last_check_error = NULLIF(?, '')
@@ -722,19 +728,48 @@ func (s *Store) SaveJob(ctx context.Context, record *JobRecord) error {
 
 // SetJobEnabled parks or resumes a config without touching anything else.
 func (s *Store) SetJobEnabled(ctx context.Context, id string, enabled bool) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE job_configs SET enabled = ?, updated_at = ? WHERE id = ?`,
-		boolToInt(enabled), nowText(), id)
-	return err
+	return s.updateJobFlag(ctx, id, func(job *config.JobConfig) { job.Enabled = &enabled },
+		`UPDATE job_configs SET enabled = ?, sha256 = ?, updated_at = ? WHERE id = ?`,
+		boolToInt(enabled))
 }
 
 // SetJobDeleteAfterArchive flips the deletion switch for one config. This is
 // the setting that decides whether archiving is a copy or a move, so it is
 // changeable on its own, without editing anything else.
+//
+// It validates first. This used to be a bare UPDATE, which mattered because the
+// rule it skipped is the one that stops a collection being emptied: a config
+// with an empty filter and deletion *off* is legal, and one click turned it into
+// "archive everything, then delete everything". Worse, the resulting row failed
+// Prepare, so the config parked itself and the operator's next sight of it was
+// an error rather than the wipe they had just armed.
 func (s *Store) SetJobDeleteAfterArchive(ctx context.Context, id string, deleteAfter bool) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE job_configs SET delete_after_archive = ?, updated_at = ? WHERE id = ?`,
-		boolToInt(deleteAfter), nowText(), id)
+	return s.updateJobFlag(ctx, id, func(job *config.JobConfig) { job.Retention.DeleteAfterArchive = deleteAfter },
+		`UPDATE job_configs SET delete_after_archive = ?, sha256 = ?, updated_at = ? WHERE id = ?`,
+		boolToInt(deleteAfter))
+}
+
+// updateJobFlag applies a one-field change, but only if the config still makes
+// sense afterwards — and recomputes the fingerprint, which a bare UPDATE did
+// not, leaving feather_runs.config_sha256 describing a config that no longer
+// existed and quietly undermining the provenance the catalogue is for.
+func (s *Store) updateJobFlag(ctx context.Context, id string, apply func(*config.JobConfig), query string, value any) error {
+	record, err := s.JobByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Validate a copy, so a rejected change leaves nothing half-applied.
+	proposed := *record.Config
+	apply(&proposed)
+	if err := proposed.Prepare(); err != nil {
+		return err
+	}
+	if err := proposed.CheckSafeToRun(); err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, query, value, proposed.ComputeSHA(), nowText(), id)
 	return err
 }
 

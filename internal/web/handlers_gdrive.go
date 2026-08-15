@@ -132,6 +132,7 @@ func (s *Server) handleGDriveCallback(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("connected, but could not reload configuration", "error", err)
 	}
 	s.log.Info("google drive destination connected", "destination", record.Alias)
+	s.audit(r, store.AuditDriveConnected, "destination", record.Alias, "")
 
 	s.setFlash(w, "ok", "Connected %s to Google Drive. Test it to confirm the folder is writable.", record.Alias)
 	http.Redirect(w, r, destinationFormPath(record.ID), http.StatusSeeOther)
@@ -149,6 +150,7 @@ func (s *Server) handleGDriveDisconnect(w http.ResponseWriter, r *http.Request) 
 		s.log.Warn("disconnected, but could not reload configuration", "error", err)
 	}
 
+	s.audit(r, store.AuditDriveDisconnected, "destination", r.PathValue("id"), "")
 	s.setFlash(w, "ok", "Disconnected from Google Drive. Archives already written stay where they are.")
 	s.redirectBack(w, r, "/destinations")
 }

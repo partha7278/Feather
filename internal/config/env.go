@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -106,6 +107,13 @@ type Env struct {
 	HTTPAddr string
 	BaseURL  string
 
+	// TrustedProxies names the networks whose X-Forwarded-For, Forwarded and
+	// X-Real-IP headers feather believes. Empty means none: the socket address
+	// is the client address, which is the only safe default for a header
+	// anybody downstream can write. Accepts CIDRs, bare addresses, and the
+	// shorthands "local" and "private".
+	TrustedProxies string
+
 	MaxConcurrentJobs int
 }
 
@@ -133,6 +141,7 @@ func LoadEnv(envFile string) (*Env, error) {
 		SpoolDir:          getString("FEATHER_SPOOL_DIR", filepath.Join(dataDir, "spool")),
 		HTTPAddr:          getString("FEATHER_HTTP_ADDR", "127.0.0.1:8477"),
 		BaseURL:           strings.TrimSuffix(getString("FEATHER_BASE_URL", ""), "/"),
+		TrustedProxies:    getString("FEATHER_TRUSTED_PROXIES", ""),
 		MaxConcurrentJobs: getInt("FEATHER_MAX_CONCURRENT_JOBS", 2),
 	}
 
@@ -172,6 +181,45 @@ func RedactMongoURI(raw string) string {
 	}
 	// url.UserPassword re-encodes the placeholder; undo that so it stays legible.
 	return strings.ReplaceAll(parsed.String(), "%E2%80%A2%E2%80%A2%E2%80%A2", "•••")
+}
+
+// credentialPatterns match the shapes a secret takes when it leaks into an
+// error message. Drivers and SDKs are not careful about this: the MongoDB
+// driver's URI parse errors quote the URI back verbatim, password and all.
+var credentialPatterns = []*regexp.Regexp{
+	// Any URL with userinfo — mongodb://, mongodb+srv://, https:// with a
+	// token in it. The password is what follows the colon.
+	regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]+):([^/\s@]+)@`),
+	// AWS-style key=value pairs in a message.
+	regexp.MustCompile(`(?i)((?:secret|password|passwd|token|apikey|api_key|access_key|secretaccesskey)\s*[=:]\s*)("?)([^\s"',;)]+)`),
+	// A bare AWS secret access key: 40 characters of base64 alphabet.
+	regexp.MustCompile(`\b[A-Za-z0-9/+=]{40}\b`),
+}
+
+// RedactSecrets strips credentials out of a string that is about to be shown to
+// someone or written down.
+//
+// Connection test failures were rendered to the browser and stored in
+// last_check_error verbatim. The redaction helper existed and was used for the
+// UI's preview of a connection string, but not for the errors — which is the
+// one place a driver is most likely to quote the URI back.
+func RedactSecrets(text string) string {
+	if text == "" {
+		return text
+	}
+	out := credentialPatterns[0].ReplaceAllString(text, "$1$2:•••@")
+	out = credentialPatterns[1].ReplaceAllString(out, "$1$2•••")
+	out = credentialPatterns[2].ReplaceAllString(out, "•••")
+	return out
+}
+
+// RedactSecretsFromError is RedactSecrets over an error's message, returning ""
+// for a nil error.
+func RedactSecretsFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return RedactSecrets(err.Error())
 }
 
 // ValidateDestination checks one backup account for the combinations that

@@ -133,7 +133,7 @@ func TestEveryPageRendersForASignedInAdmin(t *testing.T) {
 
 	for _, path := range []string{
 		"/", "/mongo", "/mongo/new", "/destinations", "/destinations/new",
-		"/configs", "/configs/new", "/backups", "/runs", "/settings",
+		"/configs", "/configs/new", "/backups", "/runs", "/audit", "/settings",
 	} {
 		response := get(t, server, path, session)
 		if response.Code != http.StatusOK {
@@ -324,7 +324,7 @@ func testServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { application.Close(ctx) })
 
-	server, err := New(application, log, false)
+	server, err := New(application, log, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

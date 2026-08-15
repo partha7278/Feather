@@ -98,6 +98,7 @@ func (s *Server) handleMongoSave(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("saved, but could not reload configuration", "error", err)
 	}
 
+	s.audit(r, store.AuditSourceSaved, "mongo_source", record.Alias, "")
 	s.setFlash(w, "ok", "Saved the MongoDB account %q. Test it to confirm feather can reach it.", record.Alias)
 	http.Redirect(w, r, "/mongo", http.StatusSeeOther)
 }
@@ -105,7 +106,7 @@ func (s *Server) handleMongoSave(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMongoTest(w http.ResponseWriter, r *http.Request) {
 	record, err := s.app.Store.MongoSourceByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.serverError(w, r, err)
+		s.notFoundOrError(w, r, err)
 		return
 	}
 
@@ -114,7 +115,7 @@ func (s *Server) handleMongoTest(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("could not record connection test", "error", recordErr)
 	}
 	if checkErr != nil {
-		s.setFlash(w, "error", "%s could not be reached: %s", record.Alias, checkErr)
+		s.setFlash(w, "error", "%s could not be reached: %s", record.Alias, config.RedactSecretsFromError(checkErr))
 	} else {
 		s.setFlash(w, "ok", "Connected to %s.", record.Alias)
 	}
@@ -136,6 +137,7 @@ func (s *Server) handleMongoDelete(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("deleted, but could not reload configuration", "error", err)
 	}
 
+	s.audit(r, store.AuditSourceDeleted, "mongo_source", r.PathValue("id"), "")
 	s.setFlash(w, "ok", "Removed the MongoDB account.")
 	http.Redirect(w, r, "/mongo", http.StatusSeeOther)
 }
@@ -274,6 +276,8 @@ func (s *Server) handleDestinationSave(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("saved, but could not reload configuration", "error", err)
 	}
 
+	s.audit(r, store.AuditDestSaved, "destination", record.Alias, string(record.Provider))
+
 	// A Drive account with an OAuth client is stored before it is authorised, so
 	// the next step is the connect button rather than the destination list.
 	if record.Provider == config.ProviderGDrive && !record.Ready() {
@@ -298,7 +302,7 @@ func container(provider config.Provider) string {
 func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 	record, err := s.app.Store.DestinationByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.serverError(w, r, err)
+		s.notFoundOrError(w, r, err)
 		return
 	}
 
@@ -314,7 +318,7 @@ func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case checkErr != nil:
-		s.setFlash(w, "error", "%s", checkErr.Error())
+		s.setFlash(w, "error", "%s", config.RedactSecretsFromError(checkErr))
 	case record.Provider == config.ProviderGDrive:
 		s.setFlash(w, "ok", "Reached Drive folder %s on %s.", record.DriveRoot(), record.Alias)
 	default:
@@ -338,6 +342,7 @@ func (s *Server) handleDestinationDelete(w http.ResponseWriter, r *http.Request)
 		s.log.Warn("deleted, but could not reload configuration", "error", err)
 	}
 
+	s.audit(r, store.AuditDestDeleted, "destination", r.PathValue("id"), "archives already written stay listed")
 	s.setFlash(w, "ok", "Removed the destination. Archives already written to it stay listed under Backups.")
 	http.Redirect(w, r, "/destinations", http.StatusSeeOther)
 }

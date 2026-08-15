@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -91,7 +92,11 @@ func run() error {
 	addr := flags.String("addr", "", "override FEATHER_HTTP_ADDR")
 	dataDir := flags.String("data-dir", "", "override FEATHER_DATA_DIR")
 	dryRun := flags.Bool("dry-run", false, "force a dry run regardless of the config setting")
-	secureCookies := flags.Bool("secure-cookies", false, "mark session cookies Secure")
+	// A tri-state on purpose: unset means "derive it from FEATHER_BASE_URL",
+	// which is what an operator publishing over HTTPS expects. Passing the flag
+	// either way overrides that, so --secure-cookies=false is still available
+	// for the rare plain-HTTP deployment.
+	secureCookies := flags.String("secure-cookies", "", "mark session cookies Secure (true/false; default: on when FEATHER_BASE_URL is https)")
 	password := flags.String("password", "", "password for create-admin/reset-password")
 	importEnv := flags.String("from-env", ".env", "env file to import accounts from")
 	importConfigs := flags.String("from-configs", "./configs", "directory of JSON retention configs to import")
@@ -147,9 +152,14 @@ func run() error {
 	}
 	log := logging.Init(env.LogLevel, env.LogJSON)
 
+	secure, err := parseTriState(*secureCookies)
+	if err != nil {
+		return fmt.Errorf("--secure-cookies: %w", err)
+	}
+
 	switch command {
 	case "serve":
-		return runServe(ctx, env, log, *secureCookies)
+		return runServe(ctx, env, log, secure)
 	case "daemon":
 		return runDaemon(ctx, env, log)
 	case "run":
@@ -185,9 +195,21 @@ func run() error {
 	}
 }
 
+// parseTriState reads a flag that has to distinguish "false" from "not given".
+func parseTriState(raw string) (*bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%q is not true or false", raw)
+	}
+	return &value, nil
+}
+
 // runServe is the normal way to run feather: the control panel and the
 // scheduler in one process, so a config saved in the browser is live at once.
-func runServe(ctx context.Context, env *config.Env, log *slog.Logger, secureCookies bool) error {
+func runServe(ctx context.Context, env *config.Env, log *slog.Logger, secureCookies *bool) error {
 	a, err := app.Open(ctx, env, log)
 	if err != nil {
 		return err
@@ -209,11 +231,16 @@ func runServe(ctx context.Context, env *config.Env, log *slog.Logger, secureCook
 		log.Info("no administrator yet — open the control panel to create one", "url", displayURL(env))
 	}
 
-	server, err := web.New(a, log, secureCookies)
+	server, err := web.New(a, log, web.Options{
+		SecureCookies:  secureCookies,
+		BaseURL:        env.BaseURL,
+		TrustedProxies: env.TrustedProxies,
+	})
 	if err != nil {
 		return err
 	}
 
+	a.StartHousekeeping(ctx)
 	a.Scheduler.Start()
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -250,6 +277,7 @@ func runDaemon(ctx context.Context, env *config.Env, log *slog.Logger) error {
 		return err
 	}
 
+	a.StartHousekeeping(ctx)
 	a.Scheduler.Start()
 	log.Info("feather daemon started", "version", buildinfo.Version(), "commit", buildinfo.Get().Commit,
 		"max_concurrent", a.MaxConcurrentJobs(ctx))

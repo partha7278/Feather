@@ -363,3 +363,65 @@ func TestDriveRootDefaultsToMyDrive(t *testing.T) {
 		t.Errorf("a named folder resolved to %q", got)
 	}
 }
+
+// Drivers and SDKs quote credentials back in their error messages — the MongoDB
+// driver's URI parse errors include the whole connection string. Those errors
+// are rendered in the UI and stored in last_check_error, so they have to be
+// cleaned on the way through.
+func TestRedactSecretsStripsCredentialsFromMessages(t *testing.T) {
+	cases := []struct {
+		name, input, mustNotContain string
+	}{
+		{
+			name:           "mongodb URI in a parse error",
+			input:          `error parsing uri: mongodb://admin:hunter2@cluster0.example.com:27017/?tls=true`,
+			mustNotContain: "hunter2",
+		},
+		{
+			name:           "mongodb+srv",
+			input:          `server selection error for mongodb+srv://user:s3cr3t-p4ss@cluster.mongodb.net`,
+			mustNotContain: "s3cr3t-p4ss",
+		},
+		{
+			name:           "a secret in a key=value message",
+			input:          `request failed: SecretAccessKey=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY and more`,
+			mustNotContain: "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+		},
+		{
+			name:           "a bearer token",
+			input:          `401 unauthorized: token: ya29.a0AfH6SMBx-notarealtoken`,
+			mustNotContain: "ya29.a0AfH6SMBx-notarealtoken",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactSecrets(tc.input)
+			if strings.Contains(got, tc.mustNotContain) {
+				t.Errorf("the credential survived redaction: %s", got)
+			}
+			if !strings.Contains(got, "•••") {
+				t.Errorf("nothing was redacted: %s", got)
+			}
+		})
+	}
+
+	// The host and the shape of the error have to survive, or the message stops
+	// being useful for working out what is wrong.
+	redacted := RedactSecrets(`error parsing uri: mongodb://admin:hunter2@cluster0.example.com:27017/?tls=true`)
+	if !strings.Contains(redacted, "cluster0.example.com:27017") {
+		t.Errorf("redaction removed the host, which is what the operator needs: %s", redacted)
+	}
+	if !strings.Contains(redacted, "admin") {
+		t.Errorf("redaction removed the username: %s", redacted)
+	}
+
+	// Nothing to redact means nothing changes.
+	plain := "connection refused"
+	if got := RedactSecrets(plain); got != plain {
+		t.Errorf("an innocuous message was altered: %q", got)
+	}
+	if RedactSecretsFromError(nil) != "" {
+		t.Error("a nil error should redact to an empty string")
+	}
+}

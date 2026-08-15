@@ -1,0 +1,89 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Activity</h1>
+    <p>Who changed what, and when. Rows marked <span class="badge warn">destructive</span> either
+      destroyed something or armed something that will.</p>
+  </div>
+</div>
+
+<div class="card">
+  <form method="get" action="/audit" class="filters">
+    <div class="field inline">
+      <label for="action">Action</label>
+      <select id="action" name="action">
+        <option value="">Everything</option>
+        {{range .Data.Actions}}
+          <option value="{{.Action}}" {{if eq .Action $.Data.Filter.Action}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+    </div>
+    <div class="field inline">
+      <label for="actor">Who</label>
+      <input type="text" id="actor" name="actor" value="{{.Data.Filter.Actor}}" placeholder="email address">
+    </div>
+    <div class="field inline">
+      <label for="target">What</label>
+      <input type="text" id="target" name="target" value="{{.Data.Filter.Target}}" placeholder="config or account name">
+    </div>
+    <button class="btn" type="submit">Filter</button>
+    <a class="btn ghost" href="/audit">Clear</a>
+  </form>
+</div>
+
+<div class="card">
+  {{if .Data.Events}}
+  <div class="table-wrap">
+    <table>
+      <caption class="visually-hidden">Recorded changes, newest first</caption>
+      <thead>
+        <tr>
+          <th scope="col">When</th>
+          <th scope="col">Who</th>
+          <th scope="col">Action</th>
+          <th scope="col">Target</th>
+          <th scope="col">Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Data.Events}}
+        <tr>
+          <td class="small nowrap">{{datetime .At}}<div class="dim">{{since .At}}</div></td>
+          <td class="small break">
+            {{.Actor}}
+            {{if .ActorIP}}<div class="dim mono">{{.ActorIP}}</div>{{end}}
+          </td>
+          <td>
+            {{auditLabel .Action}}
+            {{if .Destructive}}<span class="badge warn">destructive</span>{{end}}
+          </td>
+          <td class="small break">
+            {{if .Target}}
+              <span class="mono">{{.Target}}</span>
+              {{if .TargetKind}}<div class="dim">{{.TargetKind}}</div>{{end}}
+            {{else}}—{{end}}
+          </td>
+          <td class="small dim break">{{if .Detail}}{{.Detail}}{{else}}—{{end}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+
+  {{if gt .Data.Pages 1}}
+  <div class="pager">
+    {{if .Data.HasPrev}}
+      <a class="btn small" href="/audit{{queryString "action" .Data.Filter.Action "actor" .Data.Filter.Actor "target" .Data.Filter.Target "page" (sub .Data.Page 1)}}">Previous</a>
+    {{end}}
+    <span class="small dim">Page {{.Data.Page}} of {{.Data.Pages}} — {{number .Data.Total}} events</span>
+    {{if .Data.HasNext}}
+      <a class="btn small" href="/audit{{queryString "action" .Data.Filter.Action "actor" .Data.Filter.Actor "target" .Data.Filter.Target "page" (add .Data.Page 1)}}">Next</a>
+    {{end}}
+  </div>
+  {{end}}
+
+  {{else}}
+  <p class="empty">Nothing recorded yet. Every change made from the panel appears here.</p>
+  {{end}}
+</div>
+{{end}}
