@@ -12,6 +12,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -36,9 +37,21 @@ type Store struct {
 	secrets *secrets.Box
 	path    string
 
+	// log is used by the background goroutines the store owns — lease renewal
+	// in particular, which has no caller to return an error to. Nil is legal
+	// and means silence, which is what tests want.
+	log *slog.Logger
+
 	// SQLite serialises writers anyway; this keeps job locking honest within
 	// the process without a round trip.
 	localLocks sync.Map // config name -> struct{}
+}
+
+// WithLogger attaches a logger for the store's own background work. It returns
+// the store so it can be chained onto Open.
+func (s *Store) WithLogger(log *slog.Logger) *Store {
+	s.log = log
+	return s
 }
 
 // Open connects to the SQLite database at path, creating it if needed.
@@ -223,7 +236,24 @@ func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 // sorts correctly as a string and stays readable to anyone opening the file
 // with the sqlite3 CLI.
 
-const timeLayout = "2006-01-02T15:04:05.999Z07:00"
+// timeLayout is fixed-width on purpose.
+//
+// Timestamps are stored as text and compared as text — `ORDER BY started_at
+// DESC`, `WHERE expires_at < ?`, `MAX(finished_at)`. That only agrees with
+// chronological order if every value is the same shape, and the obvious layout
+// (".999") is not: it trims trailing zeros, so a time landing exactly on a
+// second is written "12:00:00Z" while a time 5ms later is "12:00:00.005Z".
+// Lexically '.' (0x2E) sorts before 'Z' (0x5A), so the later instant compares
+// as earlier. The result was a run list that occasionally showed the wrong
+// "last run", and an interval schedule anchored on the wrong time.
+//
+// ".000000" always writes six digits, which makes text order and time order the
+// same thing. Microseconds rather than milliseconds because ties matter too: a
+// run's rows are written in well under a millisecond, so at that precision two
+// runs regularly shared a timestamp and came back in whatever order SQLite
+// happened to scan them. Migration 003 rewrites values stored under the old
+// layout.
+const timeLayout = "2006-01-02T15:04:05.000000Z07:00"
 
 func nowText() string { return time.Now().UTC().Format(timeLayout) }
 

@@ -15,6 +15,14 @@ import (
 	"text/tabwriter"
 	"time"
 
+	// Schedules carry a timezone, and JobConfig.Prepare resolves it with
+	// time.LoadLocation on every boot for every config. Without the system
+	// tzdata that call fails, so a `make install` onto a minimal host turned
+	// every "Asia/Kolkata" schedule into a parked config. Embedding the
+	// database costs about 450 KB in the binary and removes the whole class:
+	// the system copy is still preferred when there is one.
+	_ "time/tzdata"
+
 	"golang.org/x/term"
 
 	"github.com/unifers/feather/internal/app"

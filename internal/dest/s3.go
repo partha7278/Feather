@@ -17,6 +17,7 @@ import (
 	"github.com/aws/smithy-go"
 
 	"github.com/unifers/feather/internal/config"
+	"github.com/unifers/feather/internal/retry"
 )
 
 const (
@@ -219,7 +220,39 @@ func contentTypeFor(key string) string {
 func friendly(err error) error {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
-		return fmt.Errorf("%s: %s", apiErr.ErrorCode(), apiErr.ErrorMessage())
+		readable := fmt.Errorf("%s: %s", apiErr.ErrorCode(), apiErr.ErrorMessage())
+		if permanentS3Codes[apiErr.ErrorCode()] {
+			return retry.Permanent(readable)
+		}
+		return readable
 	}
 	return err
+}
+
+// permanentS3Codes are the API errors that mean "this will not work", as
+// opposed to "this did not work just now". Retrying them wastes the backoff
+// window and delays a report the operator needs: a rejected key or a missing
+// bucket is a configuration problem, and no amount of waiting fixes it.
+//
+// Everything not listed here is treated as transient, which is the safe
+// default for an object store — throttles, resets and 5xx responses are the
+// common case, and one wasted retry costs seconds against a lost run.
+var permanentS3Codes = map[string]bool{
+	"AccessDenied":                    true,
+	"AllAccessDisabled":               true,
+	"AuthorizationHeaderMalformed":    true,
+	"InvalidAccessKeyId":              true,
+	"InvalidBucketName":               true,
+	"InvalidObjectState":              true, // an archived object needs a restore, not a retry
+	"NoSuchBucket":                    true,
+	"NoSuchKey":                       true,
+	"NotFound":                        true,
+	"SignatureDoesNotMatch":           true,
+	"InvalidArgument":                 true,
+	"KMS.DisabledException":           true,
+	"MethodNotAllowed":                true,
+	"PermanentRedirect":               true,
+	"InvalidRequest":                  true,
+	"UnsupportedOperation":            true,
+	"ObjectLockConfigurationNotFound": true,
 }

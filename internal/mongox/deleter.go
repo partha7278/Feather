@@ -3,9 +3,12 @@ package mongox
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+
+	"github.com/unifers/feather/internal/retry"
 )
 
 // DeleteByIDs removes exactly the documents that were archived, in chunks.
@@ -16,7 +19,12 @@ import (
 // document must survive even though its id is in the archive. The archive then
 // holds a copy of a row that still exists, which is harmless; the reverse —
 // deleting a row that no longer qualified — is not.
-func DeleteByIDs(ctx context.Context, coll *mongo.Collection, filter bson.D, ids []bson.RawValue, chunkSize int) (int64, error) {
+// A chunk that fails is retried. DeleteMany with an explicit id list is
+// idempotent — a document deleted by a first attempt that then lost its
+// response simply does not match the second — so the only cost of a retry is
+// that the redelivered ids contribute nothing to the count, which is the same
+// undercount a lost response produces anyway.
+func DeleteByIDs(ctx context.Context, log *slog.Logger, coll *mongo.Collection, filter bson.D, ids []bson.RawValue, chunkSize int) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -33,11 +41,20 @@ func DeleteByIDs(ctx context.Context, coll *mongo.Collection, filter bson.D, ids
 			chunk = append(chunk, id)
 		}
 
-		result, err := coll.DeleteMany(ctx, guardedFilter(filter, chunk))
+		err := retry.Do(ctx, log, retry.DefaultPolicy, "delete archived documents", func(ctx context.Context) error {
+			result, err := coll.DeleteMany(ctx, guardedFilter(filter, chunk))
+			if err != nil {
+				return err
+			}
+			deleted += result.DeletedCount
+			return nil
+		})
 		if err != nil {
+			// The count is returned alongside the error on purpose: chunks that
+			// already succeeded really are deleted, and the caller has to record
+			// that or the catalogue will disagree with MongoDB.
 			return deleted, fmt.Errorf("deleting archived documents: %w", err)
 		}
-		deleted += result.DeletedCount
 	}
 	return deleted, nil
 }

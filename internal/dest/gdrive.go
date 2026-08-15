@@ -17,6 +17,7 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/unifers/feather/internal/config"
+	"github.com/unifers/feather/internal/retry"
 )
 
 // driveFolderMIME is what Drive calls a folder. Drive has no paths, so the
@@ -385,11 +386,36 @@ func driveError(err error) error {
 	}
 	switch {
 	case strings.Contains(message, "storageQuotaExceeded"), strings.Contains(message, "Service Accounts do not have storage quota"):
-		return fmt.Errorf("%s — a service account has no Drive storage of its own; write into a shared drive, or use an OAuth client instead", message)
+		return retry.Permanent(fmt.Errorf("%s — a service account has no Drive storage of its own; write into a shared drive, or use an OAuth client instead", message))
 	case apiErr.Code == 403 && strings.Contains(message, "has not been used in project"):
-		return fmt.Errorf("%s — enable the Google Drive API for this project", message)
+		return retry.Permanent(fmt.Errorf("%s — enable the Google Drive API for this project", message))
 	case apiErr.Code == 404:
-		return fmt.Errorf("not found: %s (check the folder ID, and that it is shared with this account)", message)
+		return retry.Permanent(fmt.Errorf("not found: %s (check the folder ID, and that it is shared with this account)", message))
 	}
-	return fmt.Errorf("%d: %s", apiErr.Code, message)
+
+	readable := fmt.Errorf("%d: %s", apiErr.Code, message)
+	// 403 is Drive's code for both "you may not" and "you are going too fast";
+	// only the second is worth retrying, and the reason string is what tells
+	// them apart. 401 means the token needs refreshing, which happens on the
+	// next call rather than by waiting.
+	if apiErr.Code == 401 || (apiErr.Code == 403 && !isDriveRateLimit(apiErr)) {
+		return retry.Permanent(readable)
+	}
+	if apiErr.Code >= 400 && apiErr.Code < 500 && apiErr.Code != 408 && apiErr.Code != 429 {
+		return retry.Permanent(readable)
+	}
+	return readable
+}
+
+// isDriveRateLimit reports whether a 403 is Drive saying "slow down" rather
+// than "no".
+func isDriveRateLimit(apiErr *googleapi.Error) bool {
+	for _, item := range apiErr.Errors {
+		switch item.Reason {
+		case "rateLimitExceeded", "userRateLimitExceeded", "sharingRateLimitExceeded", "backendError":
+			return true
+		}
+	}
+	return strings.Contains(apiErr.Message, "rateLimitExceeded") ||
+		strings.Contains(apiErr.Message, "User rate limit exceeded")
 }

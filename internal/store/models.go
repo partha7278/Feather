@@ -220,7 +220,16 @@ type JobRecord struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Config    *config.JobConfig
+
+	// Problem is set when this stored config could not be prepared or is not
+	// safe to run — a rule added since it was saved, a timezone this host
+	// cannot resolve, a hand-edited row. The record is still returned so the
+	// operator can see and fix it; it is simply never scheduled or run.
+	Problem string
 }
+
+// Broken reports whether this config is parked because of Problem.
+func (r JobRecord) Broken() bool { return r.Problem != "" }
 
 // AdminUser is someone who may log into the UI.
 type AdminUser struct {

@@ -21,6 +21,7 @@ import (
 	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/dest"
 	"github.com/unifers/feather/internal/mongox"
+	"github.com/unifers/feather/internal/retry"
 	"github.com/unifers/feather/internal/store"
 )
 
@@ -33,6 +34,7 @@ type Runner struct {
 	registry *dest.Registry
 	host     string
 	log      *slog.Logger
+	retry    retry.Policy
 }
 
 func New(env *config.Env, pool *mongox.Pool, st *store.Store, registry *dest.Registry, log *slog.Logger) *Runner {
@@ -40,7 +42,10 @@ func New(env *config.Env, pool *mongox.Pool, st *store.Store, registry *dest.Reg
 	if err != nil {
 		host = "unknown"
 	}
-	return &Runner{env: env, mongo: pool, store: st, registry: registry, host: host, log: log}
+	return &Runner{
+		env: env, mongo: pool, store: st, registry: registry,
+		host: host, log: log, retry: retry.DefaultPolicy,
+	}
 }
 
 // Outcome summarises a finished run for the caller.
@@ -59,6 +64,10 @@ type Outcome struct {
 
 // ErrLocked means another run of the same config is already in flight.
 var ErrLocked = errors.New("another run of this config is already in progress")
+
+// ErrLeaseLost means this run's claim on the config was taken over while it was
+// still working. It stops rather than risk two processes deleting at once.
+var ErrLeaseLost = errors.New("this run lost its lease to another process")
 
 // Run executes one retention job end to end.
 //
@@ -91,6 +100,21 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 	// A run is bounded so a pathological job cannot hold the lock forever.
 	ctx, cancel := context.WithTimeout(ctx, job.Limits.MaxRuntime.Std())
 	defer cancel()
+
+	// Losing the lease mid-run means another process now believes it owns this
+	// config. Carrying on would archive and delete the same documents twice
+	// over, from two processes, which is the one thing the lease exists to
+	// prevent — so a lost lease cancels the run's context and it unwinds
+	// through the same path as any other failure.
+	ctx, cancelOnLeaseLoss := context.WithCancelCause(ctx)
+	defer cancelOnLeaseLoss(nil)
+	go func() {
+		select {
+		case <-lock.Lost():
+			cancelOnLeaseLoss(ErrLeaseLost)
+		case <-ctx.Done():
+		}
+	}()
 
 	resolvedFilter, err := config.ResolveTimeTokens(job.Source.Filter, time.Now())
 	if err != nil {
@@ -130,6 +154,16 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 		"destinations", job.Destinations, "delete_after_archive", job.Retention.DeleteAfterArchive)
 
 	outcome, runErr := r.execute(ctx, log, job, run, filter, projection)
+
+	// A cancelled context says nothing about why. When feather cancelled it
+	// deliberately, say so: "context canceled" in the catalogue against a run
+	// that stopped because it lost its lease tells an operator nothing, and it
+	// is the one cause worth investigating.
+	if runErr != nil {
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) && !errors.Is(cause, context.DeadlineExceeded) {
+			runErr = fmt.Errorf("%w: %w", cause, runErr)
+		}
+	}
 
 	run.Status = store.RunSuccess
 	switch {
@@ -382,7 +416,7 @@ func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.Jo
 	}
 
 	// Every copy is stored and verified; the source documents may now go.
-	deleted, err := mongox.DeleteByIDs(ctx, coll, filter, b.spool.IDs(), job.Retention.DeleteBatchSize)
+	deleted, err := mongox.DeleteByIDs(ctx, log, coll, filter, b.spool.IDs(), job.Retention.DeleteBatchSize)
 	if err != nil {
 		return err
 	}
@@ -440,7 +474,7 @@ func (r *Runner) uploadEverywhere(ctx context.Context, log *slog.Logger, job *co
 	for i, target := range targets {
 		row := rows[i]
 		group.Go(func() error {
-			err := r.uploadOne(groupCtx, target, row, b, meta, job.ShouldVerify())
+			err := r.uploadOne(groupCtx, log, target, row, b, meta, job.ShouldVerify())
 			// Recording the failure uses the parent context: the group's context
 			// is already cancelled by the time we get here.
 			mu.Lock()
@@ -462,21 +496,28 @@ func (r *Runner) uploadEverywhere(ctx context.Context, log *slog.Logger, job *co
 	return nil
 }
 
-func (r *Runner) uploadOne(ctx context.Context, target dest.Destination, row *store.ArtifactDestination,
-	b *batch, meta dest.Metadata, verify bool) error {
+func (r *Runner) uploadOne(ctx context.Context, log *slog.Logger, target dest.Destination,
+	row *store.ArtifactDestination, b *batch, meta dest.Metadata, verify bool) error {
 
-	// Each destination reads the spool file through its own handle so the
-	// parallel uploads do not share a file offset.
-	file, err := b.spool.Open()
+	var handle string
+	err := retry.Do(ctx, log, r.retry, "upload to "+target.Alias(), func(ctx context.Context) error {
+		// A fresh handle per attempt, not just per destination: a retry has to
+		// start from the beginning of the file, and the previous attempt may
+		// have read part or all of it. Opening again is also what keeps the
+		// parallel uploads from sharing a file offset.
+		file, err := b.spool.Open()
+		if err != nil {
+			return retry.Permanent(err)
+		}
+		defer func() { _ = file.Close() }()
+
+		handle, err = target.Upload(ctx, row.ObjectKey, file, b.result.BytesCompressed, meta)
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	handle, err := target.Upload(ctx, row.ObjectKey, file, b.result.BytesCompressed, meta)
-	if err != nil {
-		return err
-	}
 	row.ETag = handle
 	if err := r.store.MarkDestinationUploaded(ctx, row.ID, handle, b.result.BytesCompressed); err != nil {
 		return err
@@ -485,11 +526,18 @@ func (r *Runner) uploadOne(ctx context.Context, target dest.Destination, row *st
 	if !verify {
 		return nil
 	}
-	err = target.Verify(ctx, dest.StoredObject{
-		Key:    row.ObjectKey,
-		Handle: handle,
-		Size:   b.result.BytesCompressed,
-		SHA256: b.result.SHA256,
+
+	// Verification is retried on its own. Read-after-write on an object store
+	// is usually immediate but not always, and a copy that is genuinely wrong
+	// stays wrong — Retryable sends a checksum mismatch round again, which
+	// costs one extra download and rules out a transient read.
+	err = retry.Do(ctx, log, r.retry, "verify "+target.Alias(), func(ctx context.Context) error {
+		return target.Verify(ctx, dest.StoredObject{
+			Key:    row.ObjectKey,
+			Handle: handle,
+			Size:   b.result.BytesCompressed,
+			SHA256: b.result.SHA256,
+		})
 	})
 	if err != nil {
 		return err

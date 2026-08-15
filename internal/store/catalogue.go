@@ -192,13 +192,24 @@ func (s *Store) LastSuccessAt(ctx context.Context, configName string) (time.Time
 // FailStaleRuns closes runs this host left open. A run row stuck in "running"
 // after a crash or a hard restart would otherwise look like work in progress
 // forever.
+//
+// "Left open" has to mean abandoned, not merely "running and on this host".
+// The condition used to be the latter, which meant a starting feather marked a
+// genuinely live run in a sibling process as failed; that run's own FinishRun
+// then overwrote the status later, so the catalogue flickered between failed
+// and successful for no reason an operator could see.
+//
+// A live run holds a lease on its config. Call this after ClearStaleLeases, so
+// the only leases left are ones belonging to processes that are still alive,
+// and a surviving lease is proof the run behind it is still going.
 func (s *Store) FailStaleRuns(ctx context.Context, host string) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE feather_runs
 		SET status = ?, finished_at = ?,
 		    error = COALESCE(error, 'run did not finish — feather restarted')
-		WHERE status = ? AND host = ?`,
-		string(RunFailed), nowText(), string(RunRunning), host)
+		WHERE status = ? AND host = ?
+		  AND config_name NOT IN (SELECT config_name FROM job_leases WHERE expires_at >= ?)`,
+		string(RunFailed), nowText(), string(RunRunning), host, nowText())
 	if err != nil {
 		return 0, err
 	}
@@ -273,7 +284,12 @@ func (s *Store) RecentRuns(ctx context.Context, configName string, limit int) ([
 		query += ` WHERE config_name = ?`
 		args = append(args, configName)
 	}
-	query += ` ORDER BY started_at DESC LIMIT ?`
+	// rowid breaks ties. Two runs starting inside the same microsecond is
+	// vanishingly rare but not impossible, and without a tiebreaker SQLite is
+	// free to return them in either order — so a page refresh could reorder the
+	// list under the operator with nothing having changed. rowid is insertion
+	// order, which for runs is exactly the order they started.
+	query += ` ORDER BY started_at DESC, rowid DESC LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

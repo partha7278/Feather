@@ -520,18 +520,30 @@ const jobColumns = `
 	COALESCE(schedule_cron, ''), COALESCE(schedule_every, ''), COALESCE(schedule_at, ''),
 	schedule_timezone, max_docs_per_run, max_runtime, dry_run, sha256, created_at, updated_at`
 
-// ListJobs returns every retention config, prepared and ready to run.
+// ListJobs returns every retention config, each prepared, and each marked with
+// the reason it cannot run if there is one.
+//
+// A config that no longer prepares used to fail the whole call, and app.Open
+// calls it — so one bad row meant `feather serve` would not start, and nobody
+// could open the panel to fix the row that was blocking the boot. Worse, the
+// rows that can break this way are ones feather itself writes: a one-click
+// deletion toggle, a timezone the host has no tzdata for, a rule tightened in
+// an upgrade.
+//
+// So a broken config is now parked rather than fatal. It is returned with
+// Problem set, it appears in the UI with its error, and Jobs — what the
+// scheduler and the runner see — leaves it out entirely. The other configs keep
+// archiving, which is what an operator with ten configs and one typo wants.
 func (s *Store) ListJobs(ctx context.Context) ([]JobRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM job_configs ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var (
-		out    []JobRecord
-		byID   = map[string]*config.JobConfig{}
-		broken []string
+		out  []JobRecord
+		byID = map[string]*config.JobConfig{}
 	)
 	for rows.Next() {
 		record, err := scanJob(rows)
@@ -551,21 +563,24 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobRecord, error) {
 	if err := s.attachJobDestinations(ctx, byID); err != nil {
 		return nil, err
 	}
-	for _, record := range out {
+	for i := range out {
+		record := &out[i]
 		if err := record.Config.Prepare(); err != nil {
-			broken = append(broken, fmt.Sprintf("%s: %v", record.Config.Name, err))
+			record.Problem = err.Error()
+			continue
 		}
-	}
-	// A stored config that no longer prepares means the database was edited by
-	// hand or a migration changed the rules. Refusing everything is safer than
-	// silently running the subset that still parses.
-	if len(broken) > 0 {
-		return nil, fmt.Errorf("invalid retention config(s):\n  - %s", strings.Join(broken, "\n  - "))
+		// Prepare says feather can make sense of it; CheckSafeToRun says
+		// running it would not destroy anything. Both have to hold before a
+		// config is allowed near a collection.
+		if err := record.Config.CheckSafeToRun(); err != nil {
+			record.Problem = err.Error()
+		}
 	}
 	return out, nil
 }
 
-// Jobs is the plain list the scheduler and CLI want.
+// Jobs is the plain list the scheduler and the runner want: every config that
+// is fit to run. Broken ones are left out here and reported by ListJobs.
 func (s *Store) Jobs(ctx context.Context) ([]*config.JobConfig, error) {
 	records, err := s.ListJobs(ctx)
 	if err != nil {
@@ -573,9 +588,28 @@ func (s *Store) Jobs(ctx context.Context) ([]*config.JobConfig, error) {
 	}
 	out := make([]*config.JobConfig, 0, len(records))
 	for _, record := range records {
+		if record.Broken() {
+			continue
+		}
 		out = append(out, record.Config)
 	}
 	return out, nil
+}
+
+// BrokenJobs lists the configs that are parked, and why. Startup logs it and
+// `feather validate` reports it as a failure.
+func (s *Store) BrokenJobs(ctx context.Context) (map[string]string, error) {
+	records, err := s.ListJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	broken := map[string]string{}
+	for _, record := range records {
+		if record.Broken() {
+			broken[record.Config.Name] = record.Problem
+		}
+	}
+	return broken, nil
 }
 
 // JobByID fetches one config.

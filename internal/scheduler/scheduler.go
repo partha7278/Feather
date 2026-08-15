@@ -23,6 +23,18 @@ type Scheduler struct {
 	log    *slog.Logger
 	slots  chan struct{}
 
+	// runCtx is the context every scheduled run gets, fixed for the life of the
+	// scheduler. It is deliberately not the context passed to New or Reload:
+	// those are request-scoped, and capturing one of them in a cron closure made
+	// a job's cancellability depend on whether anyone had saved a config since
+	// boot. A job scheduled at startup was killed instantly by SIGTERM while the
+	// same job after any UI edit could not be cancelled at all.
+	runCtx context.Context
+
+	// track registers an in-flight run with the process so shutdown waits for
+	// it. May be nil, which means nothing is tracking.
+	track func() func()
+
 	mu      sync.Mutex
 	cron    *cron.Cron
 	entries []*entry
@@ -44,9 +56,14 @@ type entry struct {
 // jobs may archive at once, so a VPS is not saturated when several schedules
 // coincide.
 //
+// ctx is used for the setup queries only. runCtx is what scheduled runs get and
+// must outlive the process's signal handling — cancelling a run the instant
+// SIGTERM arrives cuts it off mid-upload, and the shutdown drain then has
+// nothing left to wait for. Shutdown is Stop plus App.Drain, not cancellation.
+//
 // An empty job list is fine: a fresh install has no configs until someone
 // creates one, and the server still has to come up so they can.
-func New(ctx context.Context, jobs []*config.JobConfig, r *runner.Runner, st *store.Store, maxConcurrent int, log *slog.Logger) (*Scheduler, error) {
+func New(ctx, runCtx context.Context, jobs []*config.JobConfig, r *runner.Runner, st *store.Store, maxConcurrent int, log *slog.Logger) (*Scheduler, error) {
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}
@@ -56,12 +73,21 @@ func New(ctx context.Context, jobs []*config.JobConfig, r *runner.Runner, st *st
 		log:    log,
 		slots:  make(chan struct{}, maxConcurrent),
 		cron:   cron.New(),
+		runCtx: runCtx,
 	}
 	if err := s.load(ctx, s.cron, jobs); err != nil {
 		return nil, err
 	}
 	s.entries = s.takePending()
 	return s, nil
+}
+
+// TrackRunsWith registers a hook called around every scheduled run, so the
+// process can wait for in-flight work at shutdown.
+func (s *Scheduler) TrackRunsWith(track func() func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.track = track
 }
 
 // load registers every enabled job on the given cron instance.
@@ -108,7 +134,8 @@ func (s *Scheduler) add(ctx context.Context, c *cron.Cron, job *config.JobConfig
 		e.schedule = e.interval
 	}
 
-	e.id = c.Schedule(e.schedule, cron.FuncJob(func() { s.fire(ctx, e) }))
+	// s.runCtx, not the ctx this setup call was given: see the field comment.
+	e.id = c.Schedule(e.schedule, cron.FuncJob(func() { s.fire(e) }))
 	s.pending = append(s.pending, e)
 
 	s.log.Info("scheduled",
@@ -191,7 +218,18 @@ func (e *entry) peek(now time.Time) time.Time {
 	return e.schedule.Next(now).In(e.job.Schedule.Location)
 }
 
-func (s *Scheduler) fire(ctx context.Context, e *entry) {
+func (s *Scheduler) fire(e *entry) {
+	s.mu.Lock()
+	ctx, track := s.runCtx, s.track
+	s.mu.Unlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if track != nil {
+		defer track()()
+	}
+
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()

@@ -379,6 +379,211 @@ func TestFailStaleRunsClosesThisHostsRuns(t *testing.T) {
 	}
 }
 
+// Startup cleanup must not touch a run that is genuinely still going in another
+// process on the same host. Marking it failed made the catalogue flicker: the
+// live run's own FinishRun overwrote the status again minutes later, and in
+// between the UI reported a failure that had not happened.
+func TestFailStaleRunsLeavesALiveRunAlone(t *testing.T) {
+	st, ctx := testStore(t)
+
+	// A live run, holding its lease the way a real one does.
+	lease, ok, err := st.TryLockJob(ctx, "orders-archive")
+	if err != nil || !ok {
+		t.Fatalf("taking the lease: %v %v", ok, err)
+	}
+	defer lease.Release(ctx)
+
+	host, _ := os.Hostname()
+	live := &Run{ConfigName: "orders-archive", Database: "shop", Collection: "orders",
+		FilterJSON: "{}", Trigger: TriggerCron, Host: host}
+	if err := st.StartRun(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second run row on the same host with no lease behind it: this one was
+	// abandoned by a process that died, and is the one to close.
+	abandoned := &Run{ConfigName: "invoices-archive", Database: "shop", Collection: "invoices",
+		FilterJSON: "{}", Trigger: TriggerCron, Host: host}
+	if err := st.StartRun(ctx, abandoned); err != nil {
+		t.Fatal(err)
+	}
+
+	closed, err := st.FailStaleRuns(ctx, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Errorf("closed %d runs, want only the abandoned one", closed)
+	}
+
+	stillRunning, err := st.Run(ctx, live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillRunning.Status != RunRunning {
+		t.Errorf("a live run in another process was marked %s", stillRunning.Status)
+	}
+}
+
+// ClearStaleLeases used to be `WHERE host = ? OR expires_at < ?`, so any
+// feather starting up deleted every live lease held by any other feather on the
+// same host — and both then archived the same config at once.
+func TestClearStaleLeasesLeavesALiveLeaseAlone(t *testing.T) {
+	st, ctx := testStore(t)
+
+	lease, ok, err := st.TryLockJob(ctx, "orders-archive")
+	if err != nil || !ok {
+		t.Fatalf("taking the lease: %v %v", ok, err)
+	}
+	defer lease.Release(ctx)
+
+	host, _ := os.Hostname()
+	if _, err := st.ClearStaleLeases(ctx, host); err != nil {
+		t.Fatal(err)
+	}
+
+	running, err := st.RunningConfigs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !running["orders-archive"] {
+		t.Fatal("startup cleanup deleted a live lease held by another process on this host")
+	}
+
+	// And the config is still locked, which is the consequence that matters:
+	// if the lease were gone, a second process would archive it concurrently.
+	if _, ok, err := st.TryLockJob(ctx, "orders-archive"); err != nil || ok {
+		t.Fatalf("the config became lockable after cleanup: %v %v", ok, err)
+	}
+}
+
+// The other half: a lease whose expiry has passed belongs to a process that is
+// not coming back, and must not block the config forever.
+func TestClearStaleLeasesRemovesAnExpiredLease(t *testing.T) {
+	st, ctx := testStore(t)
+
+	expired := timeText(time.Now().UTC().Add(-time.Hour))
+	_, err := st.DB().ExecContext(ctx, `
+		INSERT INTO job_leases (config_name, holder, host, pid, acquired_at, expires_at)
+		VALUES (?,?,?,?,?,?)`,
+		"orders-archive", "ghost/1/1", "some-other-host", 999999, expired, expired)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	host, _ := os.Hostname()
+	cleared, err := st.ClearStaleLeases(ctx, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 {
+		t.Errorf("cleared %d leases, want the one that had expired", cleared)
+	}
+	if _, ok, err := st.TryLockJob(ctx, "orders-archive"); err != nil || !ok {
+		t.Fatalf("the config is still locked by a dead process: %v %v", ok, err)
+	}
+}
+
+// A lease still inside its TTL whose owning process is gone — the crash case.
+// Only this host can tell, so only this host's rows are examined.
+func TestClearStaleLeasesRemovesALeaseWhoseProcessIsGone(t *testing.T) {
+	st, ctx := testStore(t)
+
+	host, _ := os.Hostname()
+	future := timeText(time.Now().UTC().Add(time.Hour))
+	// A PID that cannot be running: above the maximum on every platform
+	// feather targets.
+	_, err := st.DB().ExecContext(ctx, `
+		INSERT INTO job_leases (config_name, holder, host, pid, acquired_at, expires_at)
+		VALUES (?,?,?,?,?,?)`,
+		"orders-archive", "crashed/4194305/1", host, 4194305, nowText(), future)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleared, err := st.ClearStaleLeases(ctx, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 {
+		t.Errorf("cleared %d leases, want the one whose process had died", cleared)
+	}
+	if _, ok, err := st.TryLockJob(ctx, "orders-archive"); err != nil || !ok {
+		t.Fatalf("a crashed process blocked the config for its whole TTL: %v %v", ok, err)
+	}
+}
+
+// Timestamps are stored as text and ordered as text, so the two orderings have
+// to be the same thing. They were not: Go's ".999" layout trims trailing zeros,
+// writing a whole second as "12:00:00Z" and five milliseconds later as
+// "12:00:00.005Z" — and '.' sorts before 'Z', so the later instant compared as
+// earlier. It surfaced as a run list that occasionally showed the wrong "last
+// run", and it silently misanchored interval schedules, which read the last
+// success time to decide when to fire next.
+func TestStoredTimestampsSortChronologically(t *testing.T) {
+	base := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	instants := []time.Time{
+		base,                             // exactly on the second: the failing case
+		base.Add(5 * time.Millisecond),   // .005
+		base.Add(100 * time.Millisecond), // .1  under the old layout
+		base.Add(999 * time.Millisecond),
+		base.Add(time.Second),
+		base.Add(time.Minute),
+	}
+
+	for i := 1; i < len(instants); i++ {
+		earlier, later := timeText(instants[i-1]), timeText(instants[i])
+		if earlier >= later {
+			t.Errorf("%s (%s) does not sort before %s (%s)",
+				earlier, instants[i-1].Format(time.RFC3339Nano),
+				later, instants[i].Format(time.RFC3339Nano))
+		}
+		if len(earlier) != len(later) {
+			t.Errorf("stored timestamps are not fixed width: %q vs %q", earlier, later)
+		}
+	}
+}
+
+// The same property, end to end through SQLite's ORDER BY rather than Go's
+// string comparison.
+func TestRunsComeBackInTheOrderTheyHappened(t *testing.T) {
+	st, ctx := testStore(t)
+
+	const runs = 25
+	var ids []uuid.UUID
+	for i := range runs {
+		run := &Run{ConfigName: "orders-archive", Database: "shop", Collection: "orders",
+			FilterJSON: "{}", Trigger: TriggerCron, Host: "test"}
+		if err := st.StartRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+		run.Status = RunSuccess
+		run.DocsArchived = int64(i + 1)
+		if err := st.FinishRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, run.ID)
+		// Land on a variety of sub-second offsets, including whole seconds.
+		time.Sleep(time.Duration(i%7) * time.Millisecond)
+	}
+
+	listed, err := st.RecentRuns(ctx, "", runs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != runs {
+		t.Fatalf("listed %d runs, want %d", len(listed), runs)
+	}
+	// Newest first, so the listing reversed is the order they were created in.
+	for i, summary := range listed {
+		want := ids[runs-1-i]
+		if summary.RunID != want {
+			t.Fatalf("position %d is run %s, want %s — runs came back out of order",
+				i, summary.RunID, want)
+		}
+	}
+}
+
 func TestLatestRunsPicksTheMostRecentPerConfig(t *testing.T) {
 	st, ctx := testStore(t)
 

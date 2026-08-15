@@ -35,8 +35,16 @@ type App struct {
 	Host      string
 
 	// baseCtx outlives any single HTTP request, so a run started from the UI is
-	// not cancelled when the browser gets its response.
+	// not cancelled when the browser gets its response. It is also the context
+	// every scheduled run gets, so that a run's lifetime does not depend on
+	// which code path started it.
 	baseCtx context.Context
+
+	// inFlight counts runs this process owns, whoever started them. Close waits
+	// on it: a run interrupted between its DeleteMany and its catalogue write
+	// leaves documents gone from MongoDB with nothing recording where they
+	// went, which is the worst state feather can be left in.
+	inFlight sync.WaitGroup
 
 	mu      sync.Mutex
 	running map[string]time.Time
@@ -54,6 +62,7 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 	if err != nil {
 		return nil, err
 	}
+	st.WithLogger(log)
 	if err := st.Migrate(ctx); err != nil {
 		st.Close()
 		return nil, err
@@ -103,12 +112,25 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 		a.Close(ctx)
 		return nil, err
 	}
-	sched, err := scheduler.New(ctx, jobs, a.Runner, st, maxConcurrent, log)
+	sched, err := scheduler.New(ctx, a.baseCtx, jobs, a.Runner, st, maxConcurrent, log)
 	if err != nil {
 		a.Close(ctx)
 		return nil, err
 	}
+	sched.TrackRunsWith(a.Track)
 	a.Scheduler = sched
+
+	// A parked config archives nothing. It must not be a line the operator has
+	// to go looking for, so it is reported at error level, by name, with the
+	// reason — every time the process starts.
+	if broken, err := st.BrokenJobs(ctx); err != nil {
+		log.Warn("could not check for parked configs", "error", err)
+	} else {
+		for name, problem := range broken {
+			log.Error("retention config is parked and will not run until it is fixed",
+				"config", name, "problem", problem)
+		}
+	}
 
 	log.Info("feather ready",
 		"database", st.Path(),
@@ -175,7 +197,9 @@ func (a *App) StartRun(name string, trigger store.TriggerKind, dryRun bool) (boo
 	a.running[name] = time.Now()
 	a.mu.Unlock()
 
+	a.inFlight.Add(1)
 	go func() {
+		defer a.inFlight.Done()
 		defer func() {
 			a.mu.Lock()
 			delete(a.running, name)
@@ -189,18 +213,58 @@ func (a *App) StartRun(name string, trigger store.TriggerKind, dryRun bool) (boo
 	return true, nil
 }
 
+// Track registers a run this process owns so that Close waits for it. The
+// scheduler calls it; StartRun does the same thing inline.
+func (a *App) Track() func() {
+	a.inFlight.Add(1)
+	return a.inFlight.Done
+}
+
+// Drain waits for every run this process owns to finish, or for the deadline to
+// pass. It reports whether everything finished.
+//
+// Being interrupted mid-run is not itself dangerous — the ordering means
+// nothing is deleted until it is stored and verified. What is dangerous is
+// being interrupted in the narrow window after a DeleteMany and before the
+// catalogue records it, which leaves documents gone with no record of the
+// archive holding them. Waiting closes that window in the normal case.
+func (a *App) Drain(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		a.inFlight.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		a.mu.Lock()
+		names := make([]string, 0, len(a.running))
+		for name := range a.running {
+			names = append(names, name)
+		}
+		a.mu.Unlock()
+		a.Log.Warn("gave up waiting for in-flight runs", "configs", names)
+		return false
+	}
+}
+
 // Housekeeping closes run rows a previous process left open, clears its leases,
 // and drops expired sessions. Called once at startup.
 func (a *App) Housekeeping(ctx context.Context) {
-	if failed, err := a.Store.FailStaleRuns(ctx, a.Host); err != nil {
-		a.Log.Warn("could not close stale run rows", "error", err)
-	} else if failed > 0 {
-		a.Log.Warn("closed run rows left open by a previous process", "count", failed)
-	}
+	// Leases first, and the order is load-bearing: FailStaleRuns treats a
+	// surviving lease as proof that the run behind it is still alive, which is
+	// only true once the abandoned ones have been cleared.
 	if cleared, err := a.Store.ClearStaleLeases(ctx, a.Host); err != nil {
 		a.Log.Warn("could not clear stale job leases", "error", err)
 	} else if cleared > 0 {
 		a.Log.Info("cleared stale job leases", "count", cleared)
+	}
+	if failed, err := a.Store.FailStaleRuns(ctx, a.Host); err != nil {
+		a.Log.Warn("could not close stale run rows", "error", err)
+	} else if failed > 0 {
+		a.Log.Warn("closed run rows left open by a previous process", "count", failed)
 	}
 	if purged, err := a.Store.PurgeExpiredSessions(ctx); err != nil {
 		a.Log.Warn("could not purge expired sessions", "error", err)
@@ -209,10 +273,18 @@ func (a *App) Housekeeping(ctx context.Context) {
 	}
 }
 
-// Close shuts everything down.
+// Close shuts everything down, waiting for in-flight runs first.
+//
+// The order is the point. Closing the Mongo pool and the database out from
+// under a running archive is how a run ends up having deleted documents it
+// never got to catalogue, so the wait comes first and the teardown second.
 func (a *App) Close(ctx context.Context) {
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 	defer cancel()
+
+	if !a.Drain(shutdownCtx) {
+		a.Log.Warn("closing the database with runs still in flight")
+	}
 
 	if a.Mongo != nil {
 		a.Mongo.Close(shutdownCtx)
@@ -221,6 +293,11 @@ func (a *App) Close(ctx context.Context) {
 		a.Store.Close()
 	}
 }
+
+// shutdownGrace bounds the wait for in-flight runs. It is comfortably under the
+// TimeoutStopSec in deploy/feather.service, so systemd's SIGKILL is the
+// backstop rather than the normal path.
+const shutdownGrace = 2 * time.Minute
 
 // Catalog is the set of accounts a config may name, for validation and for
 // populating the forms in the UI.
