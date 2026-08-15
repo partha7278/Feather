@@ -1,0 +1,23 @@
+{
+  "_comment": "Retention configs live in feather's database and are edited in the control panel. This file is the shape `feather import` reads, for bringing an older installation across.",
+  "name": "orders-archive",
+  "source": {
+    "mongoSource": "production",
+    "database": "shop",
+    "collection": "orders",
+    "filter": {
+      "status": "completed",
+      "createdAt": { "$lt": { "$date": "{{now-90d}}" } }
+    },
+    "timestampField": "createdAt"
+  },
+  "batch": { "maxDocs": 50000, "maxBytes": "256MB" },
+  "compression": { "codec": "gzip", "level": 6 },
+  "output": {
+    "keyTemplate": "archive/{db}/{collection}/{yyyy}-{MM}/{config}-{ts}-{seq}{ext}"
+  },
+  "destinations": ["s3-primary", "s3-backup-acct", "oci-cold"],
+  "retention": { "deleteAfterArchive": true, "deleteBatchSize": 5000 },
+  "schedule": { "every": "2d", "at": "02:30", "timezone": "Asia/Kolkata" },
+  "dryRun": false
+}

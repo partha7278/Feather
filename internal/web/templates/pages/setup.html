@@ -1,0 +1,39 @@
+{{define "content"}}
+<div class="card">
+  <h2>Create the administrator account</h2>
+  <p class="hint">
+    This is the first and only step before feather is usable. The account you
+    create here signs in to this panel, where you add MongoDB accounts, backup
+    destinations, and the retention rules that decide what gets archived — and
+    whether it is then deleted.
+  </p>
+
+  <form method="post" action="/setup" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+    <div class="field">
+      <label for="email">Email address</label>
+      <input type="email" id="email" name="email" value="{{.Data.Email}}" required autofocus autocomplete="username">
+    </div>
+
+    <div class="field">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required minlength="{{.Data.MinPassword}}" autocomplete="new-password">
+      <p class="hint">At least {{.Data.MinPassword}} characters. This account can schedule deletions from your production databases, so use a passphrase you do not use anywhere else.</p>
+    </div>
+
+    <div class="field">
+      <label for="confirm">Confirm password</label>
+      <input type="password" id="confirm" name="confirm" required minlength="{{.Data.MinPassword}}" autocomplete="new-password">
+    </div>
+
+    <button class="btn primary" type="submit" style="width:100%;justify-content:center">Create account and continue</button>
+  </form>
+</div>
+
+<p class="small dim" style="text-align:center">
+  Credentials you enter later are encrypted with a master key stored outside the
+  database. Keep a copy of that key file with your backups — without it the
+  stored credentials cannot be read.
+</p>
+{{end}}

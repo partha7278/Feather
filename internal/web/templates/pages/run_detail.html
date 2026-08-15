@@ -1,0 +1,78 @@
+{{define "content"}}
+{{$run := .Data.Run}}
+<div class="page-head">
+  <div>
+    <h1>{{$run.ConfigName}}</h1>
+    <p>Run started {{datetime $run.StartedAt}} · <span class="mono small">{{$run.RunID}}</span></p>
+  </div>
+  <div class="page-actions">
+    <a class="btn" href="/backups{{queryString "run" $run.RunID}}">Files from this run</a>
+    <a class="btn" href="/runs">All runs</a>
+  </div>
+</div>
+
+{{if $run.Error}}
+<div class="notice danger">
+  <strong>This run did not complete cleanly</strong>
+  <span class="break">{{$run.Error}}</span>
+</div>
+{{end}}
+
+<div class="grid stats" style="margin-bottom:18px">
+  <div class="stat"><div class="label">Status</div><div class="value" style="font-size:19px"><span class="badge {{statusTone $run.Status}}">{{$run.Status}}</span></div><div class="sub">{{$run.Trigger}}{{if $run.DryRun}} · dry run{{end}}</div></div>
+  <div class="stat"><div class="label">Scanned</div><div class="value">{{number $run.DocsScanned}}</div><div class="sub">documents read</div></div>
+  <div class="stat"><div class="label">Archived</div><div class="value">{{number $run.DocsArchived}}</div><div class="sub">in {{$run.Batches}} file(s)</div></div>
+  <div class="stat"><div class="label">Deleted</div><div class="value">{{number $run.DocsDeleted}}</div><div class="sub">removed from MongoDB</div></div>
+  <div class="stat"><div class="label">Stored</div><div class="value">{{bytes $run.BytesStored}}</div><div class="sub">compressed, per copy</div></div>
+  <div class="stat"><div class="label">Duration</div><div class="value" style="font-size:19px">{{duration $run.Duration}}</div><div class="sub">{{if $run.FinishedAt}}finished {{datetime $run.FinishedAt}}{{else}}still running{{end}}</div></div>
+</div>
+
+<div class="card">
+  <h2>Filter as resolved</h2>
+  <p class="hint">Relative time tokens are resolved once, when the run starts. This is the exact selection the run was allowed to touch.</p>
+  <pre class="code">{{prettyJSON .Data.Filter}}</pre>
+</div>
+
+<div class="card">
+  <h2>Files</h2>
+  {{if .Data.Artifacts}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>#</th><th>File</th><th class="num">Documents</th><th class="num">Size</th><th>Data range</th><th>Source</th><th>Copies</th></tr>
+      </thead>
+      <tbody>
+      {{range .Data.Artifacts}}
+        <tr>
+          <td class="dim">{{.BatchSeq}}</td>
+          <td class="wide mono small break">{{.FileName}}<div class="dim small">sha256 {{truncate 16 .SHA256}}</div></td>
+          <td class="num">{{number .DocCount}}</td>
+          <td class="num">{{bytes .BytesCompressed}}<div class="dim small">from {{bytes .BytesRaw}}</div></td>
+          <td class="small dim nowrap">{{if .MinTS}}{{date .MinTS}} → {{date .MaxTS}}{{else}}—{{end}}</td>
+          <td class="small">
+            {{if .DeletedFromSource}}<span class="badge warn">deleted {{number .DeletedCount}}</span>{{else}}<span class="badge muted">kept</span>{{end}}
+          </td>
+          <td>
+            <div class="copies">
+            {{range .Copies}}
+              <div class="copy">
+                <span class="badge {{statusTone .Status}}">{{.Status}}</span>
+                <span>
+                  <span class="where">{{.LocationURL}}</span>
+                  <div class="dim small">{{.Alias}} · {{bytes .SizeBytes}}{{if .VerifiedAt}} · verified {{datetime .VerifiedAt}}{{end}}</div>
+                  {{if .Error}}<div class="dim small break">{{.Error}}</div>{{end}}
+                </span>
+              </div>
+            {{end}}
+            </div>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="dim small">This run produced no files{{if eq (print $run.Status) "success"}} — nothing matched its filter{{end}}.</p>
+  {{end}}
+</div>
+{{end}}

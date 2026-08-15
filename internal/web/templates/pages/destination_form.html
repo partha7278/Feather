@@ -1,0 +1,211 @@
+{{define "content"}}
+{{$d := .Data.Destination}}
+{{$isNew := eq $d.ID ""}}
+{{$isDrive := eq (print $d.Provider) "gdrive"}}
+<div class="page-head">
+  <div>
+    <h1>{{if $isNew}}Add a backup destination{{else}}{{$d.Alias}}{{end}}</h1>
+    <p>AWS S3, Oracle Cloud Object Storage through its S3-compatible endpoint, or a Google Drive folder. Secrets are encrypted before they are stored.</p>
+  </div>
+  <div class="page-actions"><a class="btn" href="/destinations">Back</a></div>
+</div>
+
+<form method="post" action="{{if $isNew}}/destinations{{else}}/destinations/{{$d.ID}}{{end}}" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <div class="card">
+    <div class="row">
+      <div class="field">
+        <label for="alias">Alias</label>
+        <input type="text" id="alias" name="alias" value="{{$d.Alias}}" required placeholder="s3-primary" {{if $isNew}}autofocus{{end}}>
+        <p class="hint">The name you pick from when choosing where a config writes.</p>
+      </div>
+      <div class="field">
+        <label for="provider">Provider</label>
+        <select id="provider" name="provider" data-provider>
+          <option value="s3" {{if eq (print $d.Provider) "s3"}}selected{{end}}>AWS S3</option>
+          <option value="oci" {{if eq (print $d.Provider) "oci"}}selected{{end}}>Oracle Cloud Object Storage</option>
+          <option value="gdrive" {{if $isDrive}}selected{{end}}>Google Drive</option>
+        </select>
+        <p class="hint">Oracle is reached over its S3-compatible API, with request checksums relaxed and path-style addressing forced. Google Drive uses the Drive API.</p>
+      </div>
+    </div>
+
+    <div data-provider-fields="s3">
+      <div class="row">
+        <div class="field">
+          <label for="bucket">Bucket</label>
+          <input type="text" id="bucket" name="bucket" value="{{$d.Bucket}}" placeholder="unifers-archive">
+        </div>
+        <div class="field">
+          <label for="region">Region</label>
+          <input type="text" id="region" name="region" value="{{$d.Region}}" placeholder="ap-south-1">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="endpoint">Endpoint</label>
+        <input type="text" id="endpoint" name="endpoint" value="{{$d.Endpoint}}" placeholder="https://&lt;namespace&gt;.compat.objectstorage.&lt;region&gt;.oraclecloud.com">
+        <p class="hint">Required for Oracle and any other S3-compatible service. Leave blank for AWS.</p>
+      </div>
+    </div>
+
+    <div data-provider-fields="gdrive">
+      <div class="row">
+        <div class="field">
+          <label for="driveFolderId">Folder</label>
+          <input type="text" id="driveFolderId" name="driveFolderId" value="{{$d.DriveFolderID}}" placeholder="folder ID, or the folder's URL">
+          <p class="hint">Where archives are filed. Paste the ID or the browser URL of the folder. Leave blank to use the account's My Drive — a service account has none, so it must name a folder.</p>
+        </div>
+        <div class="field">
+          <label for="driveId">Shared drive ID</label>
+          <input type="text" id="driveId" name="driveId" value="{{$d.DriveID}}" placeholder="optional">
+          <p class="hint">Only when the folder lives in a shared drive rather than someone's My Drive.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="prefix">Key prefix</label>
+      <input type="text" id="prefix" name="prefix" value="{{$d.Prefix}}" placeholder="optional — e.g. feather/">
+      <p class="hint">Prepended to every object key written to this destination, so the same archive can be filed differently per account. On Drive each segment becomes a folder.</p>
+    </div>
+  </div>
+
+  <div class="card" data-provider-fields="s3">
+    <h2>Credentials</h2>
+    <p class="hint">
+      For Oracle these are a <strong>Customer Secret Key</strong> (Identity → Users → your user → Customer Secret Keys), not an API signing key.
+      For AWS you may leave them blank to use an instance role or the machine's default credential chain.
+    </p>
+
+    <div class="row">
+      <div class="field">
+        <label for="accessKeyId">Access key ID</label>
+        <input type="text" id="accessKeyId" name="accessKeyId" value="{{$d.AccessKeyID}}" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="secretAccessKey">Secret access key</label>
+        <input type="password" id="secretAccessKey" name="secretAccessKey" placeholder="{{if $isNew}}required for non-AWS endpoints{{else}}leave blank to keep the stored one{{end}}" autocomplete="new-password">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="sessionToken">Session token</label>
+        <input type="password" id="sessionToken" name="sessionToken" placeholder="optional, for temporary credentials" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label for="storageClass">Storage class</label>
+        <select id="storageClass" name="storageClass">
+          {{range $.Data.StorageClasses}}
+            <option value="{{.}}" {{if eq . $d.StorageClass}}selected{{end}}>{{if .}}{{.}}{{else}}(bucket default){{end}}</option>
+          {{end}}
+        </select>
+        <p class="hint">GLACIER_IR suits archives that are rarely read back. Ignored by services that do not support it.</p>
+      </div>
+    </div>
+
+    <div class="field inline">
+      <input type="checkbox" id="forcePathStyle" name="forcePathStyle" {{if $d.ForcePathStyle}}checked{{end}} data-path-style>
+      <label for="forcePathStyle">Force path-style addressing<span class="hint" style="display:block">Required by Oracle and by most S3-compatible services. Set automatically for Oracle.</span></label>
+    </div>
+  </div>
+
+  <div class="card" data-provider-fields="gdrive">
+    <h2>Google account</h2>
+    <p class="hint">
+      Two ways in, and only one of them at a time. An <strong>OAuth client</strong> signs in as a person and uses their Drive storage —
+      that is the usual choice. A <strong>service account</strong> needs no browser but owns no storage, so it can only write into a
+      shared drive somebody has given it edit access to.
+    </p>
+
+    <div class="row">
+      <div class="field">
+        <label for="oauthClientId">OAuth client ID</label>
+        <input type="text" id="oauthClientId" name="oauthClientId" value="{{$d.OAuthClientID}}" placeholder="…apps.googleusercontent.com" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="oauthClientSecret">OAuth client secret</label>
+        <input type="password" id="oauthClientSecret" name="oauthClientSecret" placeholder="{{if $isNew}}from the Google Cloud console{{else}}leave blank to keep the stored one{{end}}" autocomplete="new-password">
+      </div>
+    </div>
+    <p class="hint">
+      Create a <strong>Web application</strong> OAuth client in the Google Cloud console with the Drive API enabled, and register this
+      redirect URI on it: <span class="mono break">{{.Data.GDriveRedirectURL}}</span>
+      {{if $isNew}}Save the destination first; connecting happens on the next screen.{{end}}
+    </p>
+
+    <div class="field">
+      <label for="serviceAccountJson">Service account key</label>
+      <textarea id="serviceAccountJson" name="serviceAccountJson" rows="5" placeholder="{{if $d.ServiceAccountJSON}}stored — paste a new key to replace it{{else}}paste the whole downloaded JSON key file{{end}}" autocomplete="off"></textarea>
+      <p class="hint">Share the target folder with the key's <code>client_email</code>, giving it edit access.</p>
+    </div>
+
+    <div class="field">
+      <label for="driveSubject">Impersonate</label>
+      <input type="text" id="driveSubject" name="driveSubject" value="{{$d.DriveSubject}}" placeholder="optional — user@example.com">
+      <p class="hint">For a service account with domain-wide delegation, the Workspace user to act as.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="field">
+      <label for="note">Note</label>
+      <input type="text" id="note" name="note" value="{{$d.Note}}" placeholder="optional — e.g. disaster recovery account">
+    </div>
+    <div class="field inline">
+      <input type="checkbox" id="enabled" name="enabled" {{if or $isNew $d.Enabled}}checked{{end}}>
+      <label for="enabled">Enabled — configs may write here</label>
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">{{if $isNew}}Add destination{{else}}Save changes{{end}}</button>
+    <a class="btn" href="/destinations">Cancel</a>
+  </div>
+</form>
+
+{{if and (not $isNew) $isDrive}}
+<div class="card" style="margin-top:18px" data-provider-fields="gdrive">
+  <h2>Google Drive access</h2>
+  {{if $d.ServiceAccountJSON}}
+    <p class="hint">This destination signs in with its service account key. There is nothing to authorise in a browser.</p>
+  {{else if $d.OAuthRefreshToken}}
+    <p class="hint">
+      <span class="badge good">connected</span>
+      feather holds a refresh token for this account and renews its own access. Disconnecting parks the destination until it is connected again;
+      it does not touch anything already in Drive.
+    </p>
+    <form method="post" action="/destinations/{{$d.ID}}/gdrive/disconnect" data-confirm="Disconnect {{$d.Alias}} from Google Drive? Configs will not be able to write here until it is reconnected.">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <button class="btn danger" type="submit">Disconnect</button>
+    </form>
+  {{else}}
+    <p class="hint">
+      <span class="badge muted">not connected</span>
+      This destination has an OAuth client but has not been authorised yet, so no config can write to it. Connecting opens Google's
+      sign-in, asks for offline access to Drive, and brings you back here.
+    </p>
+    <form method="post" action="/destinations/{{$d.ID}}/gdrive/connect">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <button class="btn primary" type="submit">Connect Google Drive</button>
+    </form>
+  {{end}}
+</div>
+{{end}}
+
+{{if not $isNew}}
+<div class="card" style="margin-top:18px">
+  <h2>Reachability</h2>
+  <p class="hint">
+    {{if $isDrive}}Testing opens the destination folder with these credentials — enough to prove the sign-in works and that feather may add files to it.
+    {{else}}Testing performs a HeadBucket with these credentials — enough to prove the keys work and the bucket exists.{{end}}
+  </p>
+  <form method="post" action="/destinations/{{$d.ID}}/test">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <button class="btn" type="submit">Test destination</button>
+  </form>
+</div>
+{{end}}
+{{end}}

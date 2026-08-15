@@ -1,0 +1,76 @@
+{{define "content"}}
+{{$s := .Data.Source}}
+{{$isNew := eq $s.ID ""}}
+<div class="page-head">
+  <div>
+    <h1>{{if $isNew}}Add a MongoDB account{{else}}{{$s.Alias}}{{end}}</h1>
+    <p>{{if $isNew}}feather reads documents from this cluster and, if the config says so, deletes them once they are safely archived.{{else}}Editing an account affects every retention config that reads from it.{{end}}</p>
+  </div>
+  <div class="page-actions"><a class="btn" href="/mongo">Back</a></div>
+</div>
+
+<form method="post" action="{{if $isNew}}/mongo{{else}}/mongo/{{$s.ID}}{{end}}" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <div class="card">
+    <div class="field">
+      <label for="alias">Alias</label>
+      <input type="text" id="alias" name="alias" value="{{$s.Alias}}" required placeholder="production" {{if $isNew}}autofocus{{end}}>
+      <p class="hint">A short name you will pick from when creating a retention config.</p>
+    </div>
+
+    <div class="field">
+      <label for="uri">Connection string</label>
+      <input type="password" id="uri" name="uri" placeholder="{{if $isNew}}mongodb://user:password@host:27017{{else}}leave blank to keep the stored one{{end}}" {{if $isNew}}required{{end}} autocomplete="new-password">
+      {{if $isNew}}
+        <p class="hint">Standard <code class="mono">mongodb://</code> or <code class="mono">mongodb+srv://</code> URI. It is encrypted before being written to disk.</p>
+      {{else}}
+        <p class="hint">Currently <span class="mono">{{$s.Preview}}</span>. Leave this blank unless you are replacing it.</p>
+      {{end}}
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="authSource">Auth source</label>
+        <input type="text" id="authSource" name="authSource" value="{{if $s.AuthSource}}{{$s.AuthSource}}{{else}}admin{{end}}">
+        <p class="hint">Applied only when the URI carries credentials and does not name one itself.</p>
+      </div>
+      <div class="field">
+        <label for="appName">Application name</label>
+        <input type="text" id="appName" name="appName" value="{{if $s.AppName}}{{$s.AppName}}{{else}}feather{{end}}">
+        <p class="hint">Shown in MongoDB's own connection logs and <code class="mono">currentOp</code>.</p>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="note">Note</label>
+      <input type="text" id="note" name="note" value="{{$s.Note}}" placeholder="optional — e.g. primary replica set, read-only user">
+    </div>
+
+    <div class="field inline">
+      <input type="checkbox" id="enabled" name="enabled" {{if or $isNew $s.Enabled}}checked{{end}}>
+      <label for="enabled">Enabled — configs may use this account</label>
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">{{if $isNew}}Add account{{else}}Save changes{{end}}</button>
+    <a class="btn" href="/mongo">Cancel</a>
+    <span class="spacer"></span>
+    {{if not $isNew}}
+      <span class="small dim">Added {{datetime $s.CreatedAt}}</span>
+    {{end}}
+  </div>
+</form>
+
+{{if not $isNew}}
+<div class="card" style="margin-top:18px">
+  <h2>Connectivity</h2>
+  <p class="hint">Testing opens a connection with these credentials and closes it again. Nothing is read or written.</p>
+  <form method="post" action="/mongo/{{$s.ID}}/test">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="btn" type="submit">Test connection</button>
+  </form>
+</div>
+{{end}}
+{{end}}

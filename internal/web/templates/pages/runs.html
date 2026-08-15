@@ -1,0 +1,66 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Runs</h1>
+    <p>Every execution, scheduled or manual, with what it read, stored and deleted.</p>
+  </div>
+  <div class="page-actions">
+    <form method="get" action="/runs">
+      <select name="config" onchange="this.form.submit()">
+        <option value="">All configs</option>
+        {{range .Data.Jobs}}
+          <option value="{{.Config.Name}}" {{if eq .Config.Name $.Data.ConfigName}}selected{{end}}>{{.Config.Name}}</option>
+        {{end}}
+      </select>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  {{if .Data.Runs}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Config</th><th>Status</th><th>Trigger</th><th>Started</th><th>Duration</th>
+          <th class="num">Scanned</th><th class="num">Archived</th><th class="num">Deleted</th>
+          <th class="num">Stored</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Data.Runs}}
+        <tr>
+          <td>
+            {{.ConfigName}}
+            {{if .DryRun}}<span class="badge muted">dry run</span>{{end}}
+          </td>
+          <td><span class="badge {{statusTone .Status}}">{{.Status}}</span></td>
+          <td class="small dim">{{.Trigger}}</td>
+          <td class="small nowrap">{{datetime .StartedAt}}<div class="dim">{{since .StartedAt}}</div></td>
+          <td class="small nowrap dim">{{duration .Duration}}</td>
+          <td class="num">{{number .DocsScanned}}</td>
+          <td class="num">{{number .DocsArchived}}</td>
+          <td class="num">{{if .DocsDeleted}}{{number .DocsDeleted}}{{else}}<span class="dim">0</span>{{end}}</td>
+          <td class="num">{{bytes .BytesStored}}</td>
+          <td class="actions"><a class="btn small" href="/runs/{{.RunID}}">Details</a></td>
+        </tr>
+        {{if .Error}}
+        <tr>
+          <td colspan="10" class="small" style="padding-top:0">
+            <span class="badge bad">error</span> <span class="dim break">{{truncate 400 .Error}}</span>
+          </td>
+        </tr>
+        {{end}}
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty">
+    <h3>Nothing has run yet</h3>
+    <p>Runs appear here as soon as a schedule fires or you start one from a config.</p>
+    <a class="btn" href="/configs">Go to retention configs</a>
+  </div>
+  {{end}}
+</div>
+{{end}}

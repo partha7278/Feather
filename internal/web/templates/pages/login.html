@@ -1,0 +1,27 @@
+{{define "content"}}
+<div class="card">
+  <h2>Sign in</h2>
+  <p class="hint">Use the administrator account created when feather was set up.</p>
+
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="next" value="{{.Data.Next}}">
+
+    <div class="field">
+      <label for="email">Email address</label>
+      <input type="email" id="email" name="email" value="{{.Data.Email}}" required autofocus autocomplete="username">
+    </div>
+
+    <div class="field">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required autocomplete="current-password">
+    </div>
+
+    <button class="btn primary" type="submit" style="width:100%;justify-content:center">Sign in</button>
+  </form>
+</div>
+
+<p class="small dim" style="text-align:center">
+  Locked out? Run <code class="mono">feather reset-password &lt;email&gt;</code> on the server.
+</p>
+{{end}}

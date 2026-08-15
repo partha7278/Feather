@@ -1,0 +1,25 @@
+bin/
+dist/
+*.tmp
+
+# Real credentials. The rig's env is committed on purpose — it holds only the
+# local docker-compose values.
+.env
+.env.*
+!.env.example
+!testdata/.env.rig
+
+# feather's own database and master key. The -wal and -shm sidecars hold the
+# same sealed credentials as the database itself, so they are ignored too.
+data/
+tmp-data/
+testdata/rig-data/
+testdata/spool/
+*.db
+*.db-wal
+*.db-shm
+master.key
+
+# Coverage and test output.
+*.out
+coverage.*

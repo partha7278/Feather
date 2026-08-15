@@ -1,0 +1,21 @@
+feather
+Copyright 2026 Unifers
+
+This product includes software developed at Unifers.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for the
+full terms.
+
+feather links the following third-party libraries. Each is distributed under its
+own licence; consult the module for the authoritative text.
+
+  github.com/aws/aws-sdk-go-v2 (and config, credentials, s3, s3/manager)  Apache-2.0
+  github.com/aws/smithy-go                                                Apache-2.0
+  go.mongodb.org/mongo-driver/v2                                          Apache-2.0
+  google.golang.org/api, google.golang.org/grpc                           Apache-2.0
+  github.com/klauspost/compress                                           BSD-3-Clause / Apache-2.0 / MIT
+  github.com/robfig/cron/v3                                               MIT
+  github.com/google/uuid                                                  BSD-3-Clause
+  github.com/joho/godotenv                                                MIT
+  golang.org/x/crypto, golang.org/x/oauth2, golang.org/x/sync, golang.org/x/term  BSD-3-Clause
+  modernc.org/sqlite                                                      BSD-3-Clause

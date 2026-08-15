@@ -1,0 +1,44 @@
+[Unit]
+Description=feather — MongoDB retention and archival
+Documentation=https://github.com/unifers/feather
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=feather
+Group=feather
+WorkingDirectory=/opt/feather
+# Optional: only process settings live here now (data dir, listen address,
+# log level, and FEATHER_MASTER_KEY if you supply the key that way).
+EnvironmentFile=-/opt/feather/.env
+ExecStart=/usr/local/bin/feather serve
+
+Restart=on-failure
+RestartSec=15s
+# Long enough for an in-flight batch to finish uploading and record itself.
+TimeoutStopSec=180
+
+# feather writes its database, master key and spool files here.
+StateDirectory=feather
+RuntimeDirectory=feather
+ReadWritePaths=/var/lib/feather
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=feather
+
+[Install]
+WantedBy=multi-user.target

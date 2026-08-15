@@ -1,0 +1,197 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p>Administrators, process settings, and where feather keeps its own data.</p>
+  </div>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>This instance</h2>
+    <form method="post" action="/settings">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <div class="field">
+        <label for="instanceName">Instance name</label>
+        <input type="text" id="instanceName" name="instanceName" value="{{.Data.InstanceName}}" placeholder="optional — e.g. production">
+        <p class="hint">Shown in logs. Useful when more than one feather is running.</p>
+      </div>
+      <div class="field">
+        <label for="maxConcurrent">Concurrent jobs</label>
+        <input type="number" id="maxConcurrent" name="maxConcurrent" value="{{.Data.MaxConcurrent}}" min="1" max="16">
+        <p class="hint">How many retention jobs may archive at the same time. Takes effect at the next restart.</p>
+      </div>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Storage</h2>
+    <p class="hint">Everything feather knows lives in one SQLite file. Back it up together with the master key.</p>
+    <dl class="kv">
+      <dt>Database</dt><dd class="mono small break">{{.Data.DatabasePath}}</dd>
+      <dt>Spool directory</dt><dd class="mono small break">{{.Data.SpoolDir}}</dd>
+      <dt>Master key</dt>
+      <dd class="mono small break">
+        {{if .Data.MasterKeyEnv}}FEATHER_MASTER_KEY (environment){{else}}{{.Data.MasterKeyPath}}{{end}}
+      </dd>
+      <dt>Host</dt><dd class="mono small">{{.Data.Host}}</dd>
+    </dl>
+    <div class="notice" style="margin-top:14px">
+      <strong>Keep the master key with your backups</strong>
+      MongoDB connection strings and cloud secrets are encrypted with it. Without the key, a copy of the database cannot be used.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>Export &amp; import</h2>
+      <p class="hint">
+        Every MongoDB account, every destination, every retention config and the settings above,
+        as one file. Move an installation to another server, or keep a copy beside your backups.
+      </p>
+    </div>
+  </div>
+
+  <div class="grid two">
+    <div>
+      <h3>Export</h3>
+      <form method="post" action="/settings/export">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <div class="field">
+          <label for="exportPassphrase">Passphrase</label>
+          <input type="password" id="exportPassphrase" name="passphrase" minlength="{{.Data.MinPassphrase}}" autocomplete="new-password">
+          <p class="hint">
+            At least {{.Data.MinPassphrase}} characters. Connection strings and cloud secrets are
+            re-sealed under it, so the file is safe to keep off this machine — and useless without
+            the passphrase. Store it somewhere you will still have it.
+          </p>
+        </div>
+        <div class="field">
+          <label for="exportPassphraseConfirm">Confirm passphrase</label>
+          <input type="password" id="exportPassphraseConfirm" name="passphraseConfirm" minlength="{{.Data.MinPassphrase}}" autocomplete="new-password">
+        </div>
+        <div class="field inline">
+          <input type="checkbox" id="withoutSecrets" name="withoutSecrets" value="true">
+          <label for="withoutSecrets">
+            Export without credentials
+            <span class="hint" style="display:block">
+              Accounts, destinations and retention rules only — no passphrase needed, and nothing
+              secret in the file. Importing it can add configs and refresh accounts that already
+              exist, but not create an account it has no credentials for.
+            </span>
+          </label>
+        </div>
+        <button class="btn primary" type="submit">Download bundle</button>
+      </form>
+    </div>
+
+    <div>
+      <h3>Import</h3>
+      <form method="post" action="/settings/import" enctype="multipart/form-data"
+            data-confirm="Import this bundle into {{if .Data.InstanceName}}{{.Data.InstanceName}}{{else}}this feather{{end}}?">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <div class="field">
+          <label for="bundle">Bundle file</label>
+          <input type="file" id="bundle" name="bundle" accept=".json,application/json" required>
+        </div>
+        <div class="field">
+          <label for="importPassphrase">Passphrase</label>
+          <input type="password" id="importPassphrase" name="passphrase" autocomplete="off">
+          <p class="hint">The one the bundle was exported with. Leave empty for a bundle exported without credentials.</p>
+        </div>
+        <div class="field inline">
+          <input type="checkbox" id="overwrite" name="overwrite" value="true">
+          <label for="overwrite">
+            Replace entries that already exist
+            <span class="hint" style="display:block">
+              Off, the import only adds what is missing and leaves everything here untouched, so
+              running it twice changes nothing the second time.
+            </span>
+          </label>
+        </div>
+        <div class="field inline">
+          <input type="checkbox" id="importSettings" name="importSettings" value="true" checked>
+          <label for="importSettings">Apply the instance name and concurrency cap from the bundle</label>
+        </div>
+        <button class="btn" type="submit">Import bundle</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="notice">
+    <strong>An import changes what runs against your data</strong>
+    Retention configs decide what is archived and whether the originals are deleted. Check the
+    imported configs — and their deletion switches — before the next scheduled run.
+  </div>
+</div>
+
+<div class="card">
+  <h2>Change your password</h2>
+  <form method="post" action="/settings/password" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="row">
+      <div class="field">
+        <label for="currentPassword">Current password</label>
+        <input type="password" id="currentPassword" name="currentPassword" required autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="newPassword">New password</label>
+        <input type="password" id="newPassword" name="newPassword" required minlength="{{.Data.MinPassword}}" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label for="confirmPassword">Confirm new password</label>
+        <input type="password" id="confirmPassword" name="confirmPassword" required minlength="{{.Data.MinPassword}}" autocomplete="new-password">
+      </div>
+    </div>
+    <button class="btn primary" type="submit">Change password</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div><h2>Administrators</h2><p class="hint">Everyone here can change retention rules, including whether data is deleted.</p></div>
+  </div>
+
+  <div class="table-wrap" style="margin-bottom:18px">
+    <table>
+      <thead><tr><th>Email</th><th>Added</th><th>Last signed in</th><th></th></tr></thead>
+      <tbody>
+      {{range .Data.Admins}}
+        <tr>
+          <td>{{.Email}}{{if eq .ID $.User.ID}} <span class="badge muted">you</span>{{end}}</td>
+          <td class="small dim">{{datetime .CreatedAt}}</td>
+          <td class="small dim">{{since .LastLoginAt}}</td>
+          <td class="actions">
+            {{if ne .ID $.User.ID}}
+            <form method="post" action="/settings/admins/{{.ID}}/delete" data-confirm="Remove {{.Email}}?">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="btn small danger" type="submit">Remove</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+
+  <form method="post" action="/settings/admins" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="row">
+      <div class="field">
+        <label for="email">Email address</label>
+        <input type="email" id="email" name="email" required autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required minlength="{{.Data.MinPassword}}" autocomplete="new-password">
+        <p class="hint">At least {{.Data.MinPassword}} characters. Share it with them out of band and have them change it.</p>
+      </div>
+    </div>
+    <button class="btn" type="submit">Add administrator</button>
+  </form>
+</div>
+{{end}}

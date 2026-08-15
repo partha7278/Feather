@@ -1,0 +1,31 @@
+{
+  "name": "test-archive",
+  "source": {
+    "database": "shop",
+    "collection": "orders",
+    "filter": {
+      "status": "completed",
+      "createdAt": { "$lt": { "$date": "{{now-90d}}" } }
+    },
+    "timestampField": "createdAt"
+  },
+  "batch": {
+    "maxDocs": 10000,
+    "maxBytes": "8MB"
+  },
+  "compression": {
+    "codec": "gzip",
+    "level": 6
+  },
+  "destinations": ["s3-primary", "s3-backup", "oci-cold"],
+  "retention": {
+    "deleteAfterArchive": true,
+    "deleteBatchSize": 5000
+  },
+  "schedule": {
+    "every": "1d",
+    "at": "02:30",
+    "timezone": "Asia/Kolkata"
+  },
+  "dryRun": false
+}

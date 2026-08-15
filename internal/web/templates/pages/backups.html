@@ -1,0 +1,116 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Backups</h1>
+    <p>Every archive file feather has written: what it is called, when it was written, how many documents it holds, how large it is, and exactly where each copy of it lives.</p>
+  </div>
+</div>
+
+<div class="card">
+  <form method="get" action="/backups" class="filters">
+    <div class="field">
+      <label for="config">Config</label>
+      <select id="config" name="config">
+        <option value="">All configs</option>
+        {{range .Data.Jobs}}
+          <option value="{{.Config.Name}}" {{if eq .Config.Name $.Data.Filter.ConfigName}}selected{{end}}>{{.Config.Name}}</option>
+        {{end}}
+      </select>
+    </div>
+    <div class="field" style="flex:1;min-width:220px">
+      <label for="q">Search</label>
+      <input type="text" id="q" name="q" value="{{.Data.Filter.Search}}" placeholder="file name or object key">
+    </div>
+    <div class="field inline" style="padding-bottom:8px">
+      <input type="checkbox" id="deleted" name="deleted" value="1" {{if .Data.Filter.DeletedOnly}}checked{{end}}>
+      <label for="deleted">Only where source was deleted</label>
+    </div>
+    <button class="btn" type="submit">Filter</button>
+    {{if or .Data.Filter.ConfigName .Data.Filter.Search .Data.Filter.DeletedOnly}}
+      <a class="btn link" href="/backups">Clear</a>
+    {{end}}
+  </form>
+
+  {{if .Data.Artifacts}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="wide">File</th><th>Config</th><th>Written</th><th>Data range</th>
+          <th class="num">Documents</th><th class="num">Size</th><th>Source</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Data.Artifacts}}
+        <tr>
+          <td class="wide">
+            <span class="mono small break">{{.FileName}}</span>
+            <div class="dim small">{{.Codec}} · batch {{.BatchSeq}}</div>
+          </td>
+          <td class="small">
+            {{.ConfigName}}
+            <div class="dim">{{.Database}}.{{.Collection}}</div>
+          </td>
+          <td class="small nowrap">
+            {{datetime .CreatedAt}}
+            <div class="dim">{{since .CreatedAt}}</div>
+          </td>
+          <td class="small nowrap dim">
+            {{if .MinTS}}{{date .MinTS}}{{if .MaxTS}} → {{date .MaxTS}}{{end}}{{else}}—{{end}}
+          </td>
+          <td class="num">{{number .DocCount}}</td>
+          <td class="num">
+            {{bytes .BytesCompressed}}
+            <div class="dim small">from {{bytes .BytesRaw}}</div>
+          </td>
+          <td class="small">
+            {{if .DeletedFromSource}}
+              <span class="badge warn">deleted</span>
+              <div class="dim">{{number .DeletedCount}} docs</div>
+              <div class="dim">{{date .DeletedAt}}</div>
+            {{else}}
+              <span class="badge muted">kept</span>
+            {{end}}
+          </td>
+          <td class="actions small nowrap">
+            <a href="/runs/{{.RunID}}">run details</a>
+          </td>
+        </tr>
+        <tr class="detail-row">
+          <td colspan="8">
+            <div class="copies">
+              {{range .Copies}}
+                <div class="copy">
+                  <span class="badge {{statusTone .Status}}">{{.Status}}</span>
+                  <span class="where">{{.LocationURL}}</span>
+                  <span class="dim small nowrap">{{.Alias}}{{if .StorageClass}} · {{.StorageClass}}{{end}} · {{bytes .SizeBytes}}</span>
+                  {{if .Error}}<span class="dim small break">{{truncate 160 .Error}}</span>{{end}}
+                </div>
+              {{else}}
+                <span class="dim small">no copies recorded</span>
+              {{end}}
+              <div class="dim small mono" title="SHA-256 of the compressed file">sha256 {{.SHA256}}</div>
+            </div>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pager">
+    <span>{{number .Data.Total}} file(s){{if gt .Data.Pages 1}} · page {{.Data.Page}} of {{.Data.Pages}}{{end}}</span>
+    <span>
+      {{if .Data.HasPrev}}<a class="btn small" href="/backups{{queryString "config" .Data.Filter.ConfigName "q" .Data.Filter.Search "page" (sub .Data.Page 1)}}">Previous</a>{{end}}
+      {{if .Data.HasNext}}<a class="btn small" href="/backups{{queryString "config" .Data.Filter.ConfigName "q" .Data.Filter.Search "page" (add .Data.Page 1)}}">Next</a>{{end}}
+    </span>
+  </div>
+  {{else}}
+  <div class="empty">
+    <h3>No archives recorded yet</h3>
+    <p>Every file written by a run is catalogued here, together with every place it was stored.</p>
+    <a class="btn" href="/configs">Go to retention configs</a>
+  </div>
+  {{end}}
+</div>
+{{end}}

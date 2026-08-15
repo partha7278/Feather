@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{.Title}} · feather</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🪶</text></svg>">
+</head>
+<body>
+{{if .LoggedIn}}
+<div class="shell">
+  <nav class="sidebar">
+    {{template "brand" .}}
+
+    <a class="nav-link {{if eq .Nav "dashboard"}}active{{end}}" href="/">
+      {{template "icon-home"}} Overview
+    </a>
+    <a class="nav-link {{if eq .Nav "configs"}}active{{end}}" href="/configs">
+      {{template "icon-clock"}} Retention configs
+    </a>
+    <a class="nav-link {{if eq .Nav "backups"}}active{{end}}" href="/backups">
+      {{template "icon-archive"}} Backups
+    </a>
+    <a class="nav-link {{if eq .Nav "runs"}}active{{end}}" href="/runs">
+      {{template "icon-activity"}} Runs
+    </a>
+
+    <div class="nav-group">Accounts</div>
+    <a class="nav-link {{if eq .Nav "mongo"}}active{{end}}" href="/mongo">
+      {{template "icon-database"}} MongoDB
+    </a>
+    <a class="nav-link {{if eq .Nav "destinations"}}active{{end}}" href="/destinations">
+      {{template "icon-cloud"}} Destinations
+    </a>
+    <a class="nav-link {{if eq .Nav "settings"}}active{{end}}" href="/settings">
+      {{template "icon-settings"}} Settings
+    </a>
+
+    <div class="sidebar-foot">
+      <div class="break">{{.User.Email}}</div>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="btn small" type="submit">Sign out</button>
+      </form>
+    </div>
+  </nav>
+
+  <main class="main">
+    {{template "flash" .}}
+    {{template "content" .}}
+  </main>
+</div>
+{{else}}
+<div class="centred">
+  <div style="width:100%;max-width:440px">
+    {{template "brand" .}}
+    {{template "flash" .}}
+    {{template "content" .}}
+  </div>
+</div>
+{{end}}
+<script src="/static/app.js"></script>
+</body>
+</html>
+
+{{define "brand"}}
+<div class="brand">
+  {{template "icon-feather"}}
+  <span>feather<small>MongoDB retention &amp; archival</small></span>
+</div>
+{{end}}
+
+{{define "flash"}}
+{{with .Flash}}<div class="flash {{.Kind}}">{{.Message}}</div>{{end}}
+{{end}}

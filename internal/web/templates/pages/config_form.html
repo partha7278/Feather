@@ -1,0 +1,312 @@
+{{define "content"}}
+{{$r := .Data.Record}}
+{{$job := .Data.Job}}
+{{$isNew := eq $r.ID ""}}
+<div class="page-head">
+  <div>
+    <h1>{{if $isNew}}New retention config{{else}}{{$job.Name}}{{end}}</h1>
+    <p>What to archive, where the copies go, when it runs, and what happens to the source documents afterwards.</p>
+  </div>
+  <div class="page-actions"><a class="btn" href="/configs">Back</a></div>
+</div>
+
+{{if not .Data.Sources}}
+<div class="notice">
+  <strong>No MongoDB account configured</strong>
+  Add one under <a href="/mongo/new">MongoDB accounts</a> first — a config has to name the cluster it reads from.
+</div>
+{{end}}
+{{if not .Data.Destinations}}
+<div class="notice">
+  <strong>No backup destination configured</strong>
+  Add one under <a href="/destinations/new">Destinations</a> first — feather will not archive without somewhere to put the data.
+</div>
+{{end}}
+
+<form method="post" action="{{if $isNew}}/configs{{else}}/configs/{{$r.ID}}{{end}}">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <div class="card">
+    <h2>Identity</h2>
+    <div class="row">
+      <div class="field">
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" value="{{$job.Name}}" required placeholder="orders-archive" pattern="[a-zA-Z0-9][a-zA-Z0-9._\-]*" {{if $isNew}}autofocus{{end}}>
+        <p class="hint">Letters, numbers, dots, dashes and underscores. Used in file names and on the command line.</p>
+      </div>
+      <div class="field" style="align-self:end">
+        <div class="field inline" style="margin:0">
+          <input type="checkbox" id="enabled" name="enabled" {{if or $isNew $job.IsEnabled}}checked{{end}}>
+          <label for="enabled">Enabled — run on schedule</label>
+        </div>
+        <div class="field inline" style="margin:8px 0 0">
+          <input type="checkbox" id="dryRun" name="dryRun" {{if $job.DryRun}}checked{{end}}>
+          <label for="dryRun">Always dry run — read and compress, never upload or delete</label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Source</h2>
+    <p class="hint">Which documents this config is about.</p>
+
+    <div class="row">
+      <div class="field">
+        <label for="mongoSource">MongoDB account</label>
+        <select id="mongoSource" name="mongoSource" required data-source>
+          <option value="">Choose an account…</option>
+          {{range .Data.Sources}}
+            <option value="{{.Alias}}" {{if eq .Alias $job.Source.MongoSource}}selected{{end}} {{if not .Enabled}}disabled{{end}}>{{.Alias}}{{if not .Enabled}} (disabled){{end}}</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="field">
+        <label for="database">Database</label>
+        <input type="text" id="database" name="database" value="{{$job.Source.Database}}" required list="database-options" data-database>
+        <datalist id="database-options"></datalist>
+      </div>
+      <div class="field">
+        <label for="collection">Collection</label>
+        <input type="text" id="collection" name="collection" value="{{$job.Source.Collection}}" required list="collection-options" data-collection>
+        <datalist id="collection-options"></datalist>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="filter">Filter</label>
+      <textarea id="filter" name="filter" rows="7" spellcheck="false">{{.Data.FilterJSON}}</textarea>
+      <p class="hint">
+        Ordinary MongoDB Extended JSON — <code class="mono">$lt</code>, <code class="mono">$in</code>, <code class="mono">$and</code>, <code class="mono">$oid</code>, <code class="mono">$date</code> all work.
+        Relative time tokens resolve on every run: <code class="mono">{{"{{now}}"}}</code>, <code class="mono">{{"{{now-90d}}"}}</code>, <code class="mono">{{"{{now-6h}}"}}</code>.
+        An empty filter combined with deletion is rejected — that would empty the collection.
+      </p>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="timestampField">Timestamp field</label>
+        <input type="text" id="timestampField" name="timestampField" value="{{$job.Source.TimestampField}}" placeholder="createdAt">
+        <p class="hint">Optional. Recorded per archive file as its date range, which is what makes "where did January go?" answerable.</p>
+      </div>
+      <div class="field">
+        <label for="readPreference">Read preference</label>
+        <select id="readPreference" name="readPreference">
+          {{range $rp := readPreferences}}
+            <option value="{{$rp}}" {{if eq $rp $job.Source.ReadPreference}}selected{{end}}>{{$rp}}</option>
+          {{end}}
+        </select>
+        <p class="hint">Reading from a secondary keeps the archive scan off the primary.</p>
+      </div>
+    </div>
+
+    <details>
+      <summary class="small dim" style="cursor:pointer">Projection (optional)</summary>
+      <div class="field" style="margin-top:10px">
+        <textarea id="projection" name="projection" rows="4" spellcheck="false" placeholder='{"_id": 1, "createdAt": 1}'>{{.Data.ProjectionJSON}}</textarea>
+        <p class="hint">Leave blank to archive whole documents. A projection that drops fields makes the archive lossy — only useful when you are certain.</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Destinations</h2>
+    <p class="hint">Each one gets a complete copy. If any copy fails, nothing is deleted.</p>
+    <div class="checklist">
+      {{range .Data.Destinations}}
+        {{$usable := and .Enabled .Ready}}
+        <label>
+          <input type="checkbox" name="destinations" value="{{.Alias}}" {{if contains $job.Destinations .Alias}}checked{{end}} {{if not $usable}}disabled{{end}}>
+          <span>
+            <strong>{{.Alias}}</strong>
+            <span class="meta">
+              {{.Provider.Label}} ·
+              {{if eq (print .Provider) "gdrive"}}{{.DriveRoot}}{{else}}{{.Bucket}}{{end}}{{if .Prefix}}/{{.Prefix}}{{end}}
+              {{if .Region}} · {{.Region}}{{end}}
+              {{if .StorageClass}} · {{.StorageClass}}{{end}}
+              {{if not .Enabled}} · disabled{{end}}
+              {{if not .Ready}} · not connected to Google Drive{{end}}
+            </span>
+          </span>
+        </label>
+      {{else}}
+        <p class="dim small">No destinations configured yet.</p>
+      {{end}}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>File names</h2>
+    <p class="hint">The name of every archive file is yours to define. Variables are substituted per batch.</p>
+
+    <div class="field">
+      <label for="keyTemplate">File name template</label>
+      <input type="text" id="keyTemplate" name="keyTemplate" value="{{$job.Output.KeyTemplate}}" required class="mono" data-key-template>
+      <p class="hint">
+        Must contain <code class="mono">{{"{runId}"}}</code> or <code class="mono">{{"{seq}"}}</code>, so two batches cannot overwrite each other.
+        Slashes create folders in the bucket. The extension comes from the codec, so end it with <code class="mono">{{"{ext}"}}</code>.
+      </p>
+      <p class="hint">Example: <span class="mono" data-key-preview>{{.Data.KeyPreview}}</span></p>
+    </div>
+
+    <table class="small">
+      <thead><tr><th>Variable</th><th>Becomes</th></tr></thead>
+      <tbody>
+      {{range keyTokens}}
+        <tr><td class="mono">{{.Token}}</td><td class="dim">{{.Meaning}}</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>After archiving</h2>
+    <p class="hint">The one setting on this page that destroys data.</p>
+
+    <div class="field inline">
+      <input type="checkbox" id="deleteAfterArchive" name="deleteAfterArchive" {{if $job.Retention.DeleteAfterArchive}}checked{{end}} data-deletion>
+      <label for="deleteAfterArchive">
+        Delete the archived documents from MongoDB
+        <span class="hint" style="display:block">
+          Off: documents are copied and left in place. On: once every destination has the file and each copy has been read back and checked,
+          the batch's documents are deleted — with the original filter re-applied, so anything that stopped matching in the meantime stays.
+        </span>
+      </label>
+    </div>
+
+    <div data-deletion-details {{if not $job.Retention.DeleteAfterArchive}}hidden{{end}}>
+      <div class="notice danger">
+        <strong>This config will remove data from MongoDB</strong>
+        Run it as a dry run first, and check the matched count, before letting it run on a schedule.
+      </div>
+      <div class="row">
+        <div class="field inline">
+          <input type="checkbox" id="verifyBeforeDelete" name="verifyBeforeDelete" {{if $job.ShouldVerify}}checked{{end}}>
+          <label for="verifyBeforeDelete">Verify every copy before deleting<span class="hint" style="display:block">Re-reads each stored object and compares size and checksum. Turning this off is not recommended.</span></label>
+        </div>
+        <div class="field">
+          <label for="deleteBatchSize">Delete batch size</label>
+          <input type="number" id="deleteBatchSize" name="deleteBatchSize" value="{{$job.Retention.DeleteBatchSize}}" min="1" max="100000">
+          <p class="hint">Documents per delete command. Smaller batches are gentler on a busy primary.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Schedule</h2>
+    <div class="row">
+      <div class="field">
+        <label for="scheduleKind">Kind</label>
+        <select id="scheduleKind" name="scheduleKind" data-schedule-kind>
+          <option value="every" {{if eq .Data.ScheduleKind "every"}}selected{{end}}>Every interval</option>
+          <option value="cron" {{if eq .Data.ScheduleKind "cron"}}selected{{end}}>Cron expression</option>
+        </select>
+      </div>
+
+      <div class="field" data-schedule="every">
+        <label for="every">Interval</label>
+        <input type="text" id="every" name="every" value="{{$job.Schedule.Every}}" placeholder="1d">
+        <p class="hint">Forms like <code class="mono">30m</code>, <code class="mono">6h</code>, <code class="mono">2d</code>. Anchored on the last completed run, so restarts do not reset the cycle.</p>
+      </div>
+      <div class="field" data-schedule="every">
+        <label for="at">At (24h)</label>
+        <input type="text" id="at" name="at" value="{{$job.Schedule.At}}" placeholder="02:30" pattern="([01]?[0-9]|2[0-3]):[0-5][0-9]">
+        <p class="hint">Only meaningful when the interval is 24h or more.</p>
+      </div>
+
+      <div class="field" data-schedule="cron" hidden>
+        <label for="cron">Cron expression</label>
+        <input type="text" id="cron" name="cron" value="{{$job.Schedule.Cron}}" placeholder="30 2 * * *" class="mono">
+        <p class="hint">Standard five-field cron. Prefer an interval: cron cannot express "every 2 days" without a gap at month boundaries.</p>
+      </div>
+
+      <div class="field">
+        <label for="timezone">Timezone</label>
+        <input type="text" id="timezone" name="timezone" value="{{if $job.Schedule.Timezone}}{{$job.Schedule.Timezone}}{{else}}UTC{{end}}" list="timezone-options" required>
+        <datalist id="timezone-options">
+          {{range timezones}}<option value="{{.}}"></option>{{end}}
+        </datalist>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Batching and limits</h2>
+    <p class="hint">How much goes into one file, and how much one run may do. The defaults suit a small VPS.</p>
+    <div class="row">
+      <div class="field">
+        <label for="batchMaxDocs">Documents per file</label>
+        <input type="number" id="batchMaxDocs" name="batchMaxDocs" value="{{$job.Batch.MaxDocs}}" min="1">
+      </div>
+      <div class="field">
+        <label for="batchMaxBytes">Uncompressed bytes per file</label>
+        <input type="text" id="batchMaxBytes" name="batchMaxBytes" value="{{.Data.MaxBytes}}" placeholder="256MB">
+      </div>
+      <div class="field">
+        <label for="fetchSize">Cursor batch size</label>
+        <input type="number" id="fetchSize" name="fetchSize" value="{{$job.Batch.FetchSize}}" min="1" max="100000">
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="codec">Compression</label>
+        <select id="codec" name="codec">
+          <option value="gzip" {{if eq $job.Compression.Codec "gzip"}}selected{{end}}>gzip</option>
+          <option value="zstd" {{if eq $job.Compression.Codec "zstd"}}selected{{end}}>zstd</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="codecLevel">Level</label>
+        <input type="number" id="codecLevel" name="codecLevel" value="{{$job.Compression.Level}}" min="1" max="9">
+        <p class="hint">gzip 1–9, zstd 1–4.</p>
+      </div>
+      <div class="field">
+        <label for="maxDocsPerRun">Max documents per run</label>
+        <input type="number" id="maxDocsPerRun" name="maxDocsPerRun" value="{{$job.Limits.MaxDocsPerRun}}" min="0">
+        <p class="hint">0 means no cap. Useful the first time this is pointed at a large collection.</p>
+      </div>
+      <div class="field">
+        <label for="maxRuntime">Max runtime</label>
+        <input type="text" id="maxRuntime" name="maxRuntime" value="{{.Data.MaxRuntime}}" placeholder="6h">
+      </div>
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">{{if $isNew}}Create config{{else}}Save changes{{end}}</button>
+    <a class="btn" href="/configs">Cancel</a>
+    <span class="spacer"></span>
+    {{if not $isNew}}
+      <span class="small dim">Updated {{datetime $r.UpdatedAt}}</span>
+    {{end}}
+  </div>
+</form>
+
+{{if not $isNew}}
+<div class="card" style="margin-top:18px">
+  <h2>Check and run</h2>
+  <p class="hint">Counting matches resolves the filter's time tokens against right now and asks MongoDB how many documents it selects.</p>
+  <div style="display:flex;gap:10px;flex-wrap:wrap">
+    <form method="post" action="/configs/{{$r.ID}}/preview">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="btn" type="submit">Count matching documents</button>
+    </form>
+    <form method="post" action="/configs/{{$r.ID}}/run">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="dryRun" value="1">
+      <button class="btn" type="submit">Dry run</button>
+    </form>
+    <form method="post" action="/configs/{{$r.ID}}/run" data-confirm="{{if $job.Retention.DeleteAfterArchive}}Run {{$job.Name}} now? Matching documents will be archived and then DELETED from MongoDB.{{else}}Run {{$job.Name}} now?{{end}}">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="btn primary" type="submit">Run now</button>
+    </form>
+    <span class="spacer" style="flex:1"></span>
+    <form method="post" action="/configs/{{$r.ID}}/delete" data-confirm="Remove the config {{$job.Name}}? Its archives and run history are kept.">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="btn danger" type="submit">Remove config</button>
+    </form>
+  </div>
+</div>
+{{end}}
+{{end}}

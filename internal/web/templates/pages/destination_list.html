@@ -1,0 +1,82 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Backup destinations</h1>
+    <p>Where archives are written. A retention config can name several, and every one receives a full copy — nothing is deleted from MongoDB until all of them are verified.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn primary" href="/destinations/new">{{template "icon-plus"}} Add destination</a>
+  </div>
+</div>
+
+<div class="card">
+  {{if .Data.Destinations}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Alias</th><th>Provider</th><th>Bucket / folder</th><th>Region / endpoint</th><th>Holding</th><th>Last test</th><th>Used by</th><th></th></tr>
+      </thead>
+      <tbody>
+      {{range .Data.Destinations}}
+        {{$usage := index $.Data.Usage .Alias}}
+        {{$isDrive := eq (print .Provider) "gdrive"}}
+        <tr>
+          <td>
+            <a href="/destinations/{{.ID}}"><strong>{{.Alias}}</strong></a>
+            {{if not .Enabled}}<span class="badge muted">disabled</span>{{end}}
+            {{if not .Ready}}<span class="badge bad">not connected</span>{{end}}
+            {{if .Note}}<div class="small dim">{{.Note}}</div>{{end}}
+          </td>
+          <td>
+            <span class="badge muted">{{.Provider.Label}}</span>
+            {{if .StorageClass}}<div class="small dim">{{.StorageClass}}</div>{{end}}
+          </td>
+          <td class="mono small break">
+            {{if $isDrive}}{{.DriveRoot}}{{else}}{{.Bucket}}{{end}}{{if .Prefix}}<span class="dim">/{{.Prefix}}</span>{{end}}
+          </td>
+          <td class="small dim break">
+            {{if $isDrive}}
+              {{if .DriveID}}shared drive <span class="mono">{{.DriveID}}</span>{{else if .ServiceAccountJSON}}service account{{else}}OAuth client{{end}}
+            {{else}}
+              {{.Region}}{{if .Endpoint}}<div class="mono">{{.Endpoint}}</div>{{end}}
+            {{end}}
+          </td>
+          <td class="small">
+            {{if $usage.Objects}}{{number $usage.Objects}} objects<div class="dim">{{bytes $usage.Bytes}}</div>{{else}}<span class="dim">—</span>{{end}}
+          </td>
+          <td class="small">
+            {{if .Check.Tested}}
+              {{if .Check.OK}}<span class="badge good">reachable</span>{{else}}<span class="badge bad">failed</span>{{end}}
+              <div class="dim small">{{since .Check.At}}</div>
+              {{if .Check.Error}}<div class="dim small break">{{truncate 140 .Check.Error}}</div>{{end}}
+            {{else}}<span class="badge muted">not tested</span>{{end}}
+          </td>
+          <td class="small dim">
+            {{$used := index $.Data.UsedBy .Alias}}
+            {{if $used}}{{range $i, $name := $used}}{{if $i}}, {{end}}{{$name}}{{end}}{{else}}—{{end}}
+          </td>
+          <td class="actions">
+            <form method="post" action="/destinations/{{.ID}}/test">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="btn small" type="submit">Test</button>
+            </form>
+            <a class="btn small" href="/destinations/{{.ID}}">Edit</a>
+            <form method="post" action="/destinations/{{.ID}}/delete" data-confirm="Remove the destination {{.Alias}}? Objects already written stay in the bucket.">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="btn small danger" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty">
+    <h3>No destinations yet</h3>
+    <p>Add an AWS S3 bucket, an Oracle Cloud Object Storage bucket, or a Google Drive folder. feather refuses to delete data it has not stored somewhere, so at least one is required.</p>
+    <a class="btn primary" href="/destinations/new">Add the first destination</a>
+  </div>
+  {{end}}
+</div>
+{{end}}

@@ -1,0 +1,67 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>MongoDB accounts</h1>
+    <p>The clusters feather reads from. Connection strings are encrypted before they are stored, and are never shown again once saved.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn primary" href="/mongo/new">{{template "icon-plus"}} Add account</a>
+  </div>
+</div>
+
+<div class="card">
+  {{if .Data.Sources}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Alias</th><th>Connection</th><th>Auth source</th><th>Last test</th><th>Used by</th><th></th></tr>
+      </thead>
+      <tbody>
+      {{range .Data.Sources}}
+        <tr>
+          <td>
+            <a href="/mongo/{{.ID}}"><strong>{{.Alias}}</strong></a>
+            {{if not .Enabled}}<span class="badge muted">disabled</span>{{end}}
+            {{if .Note}}<div class="small dim">{{.Note}}</div>{{end}}
+          </td>
+          <td class="mono small break">{{.Preview}}</td>
+          <td class="small dim">{{.AuthSource}}</td>
+          <td class="small">
+            {{if .Check.Tested}}
+              {{if .Check.OK}}<span class="badge good">reachable</span>
+              {{else}}<span class="badge bad">failed</span>{{end}}
+              <div class="dim small">{{since .Check.At}}</div>
+              {{if .Check.Error}}<div class="dim small break">{{truncate 140 .Check.Error}}</div>{{end}}
+            {{else}}
+              <span class="badge muted">not tested</span>
+            {{end}}
+          </td>
+          <td class="small dim">
+            {{$used := index $.Data.UsedBy .Alias}}
+            {{if $used}}{{range $i, $name := $used}}{{if $i}}, {{end}}{{$name}}{{end}}{{else}}—{{end}}
+          </td>
+          <td class="actions">
+            <form method="post" action="/mongo/{{.ID}}/test">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="btn small" type="submit">Test</button>
+            </form>
+            <a class="btn small" href="/mongo/{{.ID}}">Edit</a>
+            <form method="post" action="/mongo/{{.ID}}/delete" data-confirm="Remove the MongoDB account {{.Alias}}?">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="btn small danger" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty">
+    <h3>No MongoDB accounts yet</h3>
+    <p>Add the connection string for the cluster you want to archive from. You can add more later — each retention config names the account it reads.</p>
+    <a class="btn primary" href="/mongo/new">Add the first account</a>
+  </div>
+  {{end}}
+</div>
+{{end}}

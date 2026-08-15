@@ -1,0 +1,39 @@
+# The build context is copied wholesale by `COPY . .`, so anything secret or
+# irrelevant that sits in the working tree ends up in a build layer. Keep this
+# list at least as strict as .gitignore — git is not the only thing that reads
+# this directory.
+
+# feather's own state. master.key decrypts every stored credential; a stray copy
+# of it in a build layer is the whole security model gone.
+master.key
+*.key
+data/
+tmp-data/
+testdata/rig-data/
+*.db
+*.db-wal
+*.db-shm
+
+# Real credentials. Unlike .gitignore there is no reason to admit any .env here:
+# the image takes its settings from the environment at run time.
+.env
+.env.*
+
+# Build output. The binary is rebuilt inside the image; copying a host build in
+# invalidates the layer cache on every run and can smuggle in a stale artifact.
+bin/
+*.tmp
+
+# The local verification rig — Mongo, MinIO and a 200k-document seeder are for
+# `make rig-up`, not for the image.
+testdata/
+
+# Version control and tooling.
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Docs and deployment assets. Nothing in the build needs them.
+*.md
+deploy/

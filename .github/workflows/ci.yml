@@ -1,0 +1,165 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  # A CVE lands in a dependency without anyone touching this repository, so the
+  # vulnerability scan has to run on a clock, not only on a push.
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.6"
+
+jobs:
+  check:
+    name: vet, lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # -race because App.running, Registry.byAlias and Scheduler.entries are
+      # all hand-guarded by mutexes; -count=1 so a cached pass cannot hide a
+      # regression.
+      - name: go test -race
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: coverage summary
+        if: matrix.os == 'ubuntu-latest'
+        run: go tool cover -func=coverage.out | tail -1
+
+  # The end-to-end suite: archive to real object storage, verify, delete, and
+  # restore. This is the job that proves the durability guarantee, so it gates
+  # the build rather than running as an optional extra.
+  integration:
+    name: end-to-end (mongo + minio)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: start the rig
+        run: docker compose -f testdata/docker-compose.yml up -d --wait
+
+      - name: seed
+        run: go run ./testdata/seed -n 5000
+
+      - name: go test -tags=integration
+        run: go test -race -count=1 -tags=integration ./internal/e2e/...
+
+      - name: rig logs on failure
+        if: failure()
+        run: docker compose -f testdata/docker-compose.yml logs
+
+      - name: stop the rig
+        if: always()
+        run: docker compose -f testdata/docker-compose.yml down -v
+
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "(devel)")
+          PKG=github.com/unifers/feather/internal/buildinfo
+          go build -trimpath -ldflags="-s -w \
+            -X $PKG.version=$VERSION \
+            -X $PKG.commit=$GITHUB_SHA \
+            -X $PKG.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "bin/feather-${GOOS}-${GOARCH}" ./cmd/feather
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feather-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/feather-*
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}

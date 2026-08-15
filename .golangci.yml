@@ -1,0 +1,90 @@
+version: "2"
+
+# The linter set is chosen for one risk: feather deletes production data, so a
+# swallowed error is how that goes wrong silently. Checks that only express a
+# style preference are off — a linter nobody can keep green stops being read.
+
+run:
+  timeout: 5m
+  build-tags:
+    - integration
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Unclosed rows/bodies leak the single SQLite connection and HTTP sockets.
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    # errors.Is/As over ==, and %w over %v, so wrapped errors stay inspectable.
+    - errorlint
+    - copyloopvar
+    - misspell
+    - unconvert
+    - wastedassign
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        # Deferred Close on a read handle and writes to a tabwriter or an
+        # already-failed response have nothing to report and nowhere to report
+        # it. Every one of these is in a defer or a terminal print path.
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*os.File).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    staticcheck:
+      # all, minus the stylistic (ST) and quickfix (QF) families: this codebase
+      # has a deliberate and consistent comment style of its own.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        # Error strings here legitimately begin with proper nouns — "Oracle
+        # Cloud needs…", "Google Drive needs…" — and the operator reads them.
+        - -ST1005
+        - -ST1021
+        - -QF1003
+        - -QF1006
+        - -QF1008
+    govet:
+      enable-all: true
+      disable:
+        # shadow fires ~40 times on idiomatic `if err := ...` nesting, and
+        # fieldalignment asks for struct reordering worth a handful of bytes.
+        # Neither justifies the churn or the reordering of readable structs.
+        - shadow
+        - fieldalignment
+
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+          - errorlint
+      # The AWS SDK deprecated manager.Uploader in favour of a transfermanager
+      # package that is still taking shape. Migrating is a deliberate change to
+      # the upload path, not a lint fix.
+      - path: internal/dest/s3\.go
+        text: "SA1019.*manager"
+      # option.WithCredentialsJSON is deprecated in favour of a credentials
+      # flow that does not suit a service-account key pasted into a form.
+      # Changing how Drive authenticates is a deliberate change, not a lint fix.
+      - path: internal/dest/gdrive\.go
+        text: "SA1019.*WithCredentialsJSON"
+
+formatters:
+  enable:
+    - gofmt

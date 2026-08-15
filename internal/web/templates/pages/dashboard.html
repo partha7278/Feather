@@ -1,0 +1,172 @@
+{{define "content"}}
+{{$t := .Data.Totals}}
+<div class="page-head">
+  <div>
+    <h1>Overview</h1>
+    <p>What has been archived, what is scheduled next, and which configs are allowed to delete from MongoDB.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn" href="/backups">Browse backups</a>
+    <a class="btn primary" href="/configs/new">{{template "icon-plus"}} New config</a>
+  </div>
+</div>
+
+{{if or .Data.NeedsSetupSteps.mongo .Data.NeedsSetupSteps.destinations .Data.NeedsSetupSteps.configs}}
+<div class="card">
+  <h2>Finish setting up</h2>
+  <p class="hint">Three things stand between here and the first archive.</p>
+  <div class="steps">
+    <div class="step {{if not .Data.NeedsSetupSteps.mongo}}done{{end}}">
+      <span class="num">1</span>
+      <div>
+        <strong>Add a MongoDB account</strong>
+        <p>The cluster feather reads from. You can add as many as you need — each config picks one.</p>
+        {{if .Data.NeedsSetupSteps.mongo}}<a class="btn small" href="/mongo/new" style="margin-top:8px">Add account</a>{{end}}
+      </div>
+    </div>
+    <div class="step {{if not .Data.NeedsSetupSteps.destinations}}done{{end}}">
+      <span class="num">2</span>
+      <div>
+        <strong>Add a backup destination</strong>
+        <p>An S3 or Oracle Cloud bucket. A config can write to several at once, and every one gets a full copy.</p>
+        {{if .Data.NeedsSetupSteps.destinations}}<a class="btn small" href="/destinations/new" style="margin-top:8px">Add destination</a>{{end}}
+      </div>
+    </div>
+    <div class="step {{if not .Data.NeedsSetupSteps.configs}}done{{end}}">
+      <span class="num">3</span>
+      <div>
+        <strong>Create a retention config</strong>
+        <p>What to archive, where to put it, when to run, and whether the source documents are deleted afterwards.</p>
+        {{if and (not .Data.NeedsSetupSteps.destinations) (not .Data.NeedsSetupSteps.mongo) .Data.NeedsSetupSteps.configs}}<a class="btn small" href="/configs/new" style="margin-top:8px">Create config</a>{{end}}
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}
+
+<div class="grid stats" style="margin-bottom:18px">
+  <div class="stat">
+    <div class="label">Archived documents</div>
+    <div class="value">{{number $t.DocsArchived}}</div>
+    <div class="sub">across {{number $t.Artifacts}} files</div>
+  </div>
+  <div class="stat">
+    <div class="label">Stored</div>
+    <div class="value">{{bytes $t.BytesStored}}</div>
+    <div class="sub">compressed, per copy</div>
+  </div>
+  <div class="stat">
+    <div class="label">Deleted from MongoDB</div>
+    <div class="value">{{number $t.DocsDeleted}}</div>
+    <div class="sub">after verified upload</div>
+  </div>
+  <div class="stat">
+    <div class="label">Runs in 24h</div>
+    <div class="value">{{number $t.RunsLast24h}}</div>
+    <div class="sub">{{if gt $t.FailedRuns 0}}{{number $t.FailedRuns}} failed or partial all-time{{else}}no failures recorded{{end}}</div>
+  </div>
+</div>
+
+{{if .Data.Deleting}}
+<div class="notice">
+  <strong>Deletion is enabled on {{len .Data.Deleting}} config(s)</strong>
+  {{range $i, $name := .Data.Deleting}}{{if $i}}, {{end}}<a href="/configs">{{$name}}</a>{{end}} —
+  documents matching those filters are removed from MongoDB once every copy is stored and verified.
+</div>
+{{end}}
+
+<div class="grid two">
+  <div class="card">
+    <div class="card-head">
+      <div><h2>Schedule</h2><p class="hint">Next run for each enabled config.</p></div>
+      <a class="btn small" href="/configs">All configs</a>
+    </div>
+    {{if .Data.Jobs}}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Config</th><th>Collection</th><th>Next run</th><th>Deletes</th></tr></thead>
+        <tbody>
+        {{range .Data.Jobs}}
+          {{$job := .Config}}
+          <tr>
+            <td>
+              <a href="/configs/{{.ID}}">{{$job.Name}}</a>
+              {{if not $job.IsEnabled}}<span class="badge muted">paused</span>{{end}}
+              {{if index $.Data.Running $job.Name}}<span class="badge busy">running</span>{{end}}
+            </td>
+            <td class="small dim">{{$job.Source.Database}}.{{$job.Source.Collection}}</td>
+            <td class="small">
+              {{$next := index $.Data.NextRuns $job.Name}}
+              {{if $next.IsZero}}<span class="dim">—</span>{{else}}{{datetime $next}}{{end}}
+            </td>
+            <td>
+              {{if $job.Retention.DeleteAfterArchive}}<span class="badge warn">yes</span>
+              {{else}}<span class="badge muted">no</span>{{end}}
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="dim small">No retention configs yet.</p>
+    {{end}}
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div><h2>Storage by destination</h2><p class="hint">What each account is holding.</p></div>
+      <a class="btn small" href="/destinations">Manage</a>
+    </div>
+    {{if .Data.Usage}}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Destination</th><th>Bucket</th><th class="num">Objects</th><th class="num">Size</th><th>Last write</th></tr></thead>
+        <tbody>
+        {{range .Data.Usage}}
+          <tr>
+            <td>{{.Alias}} {{if .Failed}}<span class="badge bad">{{.Failed}} failed</span>{{end}}</td>
+            <td class="small mono">{{.Bucket}}</td>
+            <td class="num">{{number .Objects}}</td>
+            <td class="num">{{bytes .Bytes}}</td>
+            <td class="small dim nowrap">{{since .LastWrite}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="dim small">Nothing has been uploaded yet.</p>
+    {{end}}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div><h2>Recent runs</h2></div>
+    <a class="btn small" href="/runs">All runs</a>
+  </div>
+  {{if .Data.Recent}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Config</th><th>Status</th><th>Started</th><th class="num">Archived</th><th class="num">Deleted</th><th class="num">Stored</th><th></th></tr></thead>
+      <tbody>
+      {{range .Data.Recent}}
+        <tr>
+          <td>{{.ConfigName}}{{if .DryRun}} <span class="badge muted">dry run</span>{{end}}</td>
+          <td><span class="badge {{statusTone .Status}}">{{.Status}}</span></td>
+          <td class="small nowrap">{{datetime .StartedAt}}</td>
+          <td class="num">{{number .DocsArchived}}</td>
+          <td class="num">{{number .DocsDeleted}}</td>
+          <td class="num">{{bytes .BytesStored}}</td>
+          <td class="actions"><a class="btn small" href="/runs/{{.RunID}}">Details</a></td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="dim small">No runs yet.</p>
+  {{end}}
+</div>
+{{end}}
