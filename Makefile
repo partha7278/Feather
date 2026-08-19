@@ -32,7 +32,9 @@ test-fast:
 # The end-to-end suite against the local rig. Skips itself when the rig is not
 # up, so it is safe to run unconditionally.
 test-integration:
-	go test -race -count=1 -tags=integration ./internal/e2e/...
+	@FEATHER_TEST_MONGO_URI=mongodb://127.0.0.1:27018 \
+	FEATHER_TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
+	go test -race -count=1 -tags=integration -timeout 20m ./internal/e2e/...
 
 vet:
 	go vet ./...

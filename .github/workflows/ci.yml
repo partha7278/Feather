@@ -92,7 +92,13 @@ jobs:
         run: go run ./testdata/seed -n 5000
 
       - name: go test -tags=integration
-        run: go test -race -count=1 -tags=integration ./internal/e2e/...
+        env:
+          FEATHER_TEST_MONGO_URI: mongodb://127.0.0.1:27018
+          FEATHER_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          # CI starts the rig on purpose, so a rig that is not up is a failure,
+          # not a reason to pass quietly.
+          FEATHER_TEST_REQUIRE_RIG: "1"
+        run: go test -race -count=1 -tags=integration -timeout 20m ./internal/e2e/...
 
       - name: rig logs on failure
         if: failure()
