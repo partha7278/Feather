@@ -361,3 +361,17 @@ tr:has(+ tr.detail-row) td { border-bottom: none; padding-bottom: 4px; }
   white-space: nowrap;
   border: 0;
 }
+
+/* Progress, shown while a run is in flight. */
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+  margin: 8px 0 4px;
+}
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width .4s ease;
+}

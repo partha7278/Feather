@@ -594,3 +594,116 @@ func (s *Store) ArtifactsForConfig(ctx context.Context, configName string) ([]Ar
 // allArtifacts is the limit used when the caller genuinely wants all of them —
 // a scrub, or a restore of a whole run.
 const allArtifacts = 100000
+
+// ConfigHealth is the per-config state a monitoring system needs.
+type ConfigHealth struct {
+	ConfigName    string
+	Enabled       bool
+	DeleteEnabled bool
+	Parked        bool
+	LastSuccessAt *time.Time
+	LastRunAt     *time.Time
+	LastStatus    RunStatus
+	FailuresSince int64 // consecutive failures since the last success
+}
+
+// ConfigHealthAll reports every config's state in one query pass.
+//
+// The number that matters here is the age of the last success. A config that
+// has been failing every night for a week looks identical to a healthy one in
+// every other view — the runs page shows failures, but only if somebody opens
+// it. This is what an alert rule watches.
+func (s *Store) ConfigHealthAll(ctx context.Context) ([]ConfigHealth, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			j.name,
+			j.enabled,
+			j.delete_after_archive,
+			(SELECT MAX(COALESCE(r.finished_at, r.started_at)) FROM feather_runs r
+			  WHERE r.config_name = j.name AND r.status IN (?, ?) AND r.dry_run = 0),
+			(SELECT MAX(r.started_at) FROM feather_runs r WHERE r.config_name = j.name AND r.dry_run = 0),
+			COALESCE((SELECT r.status FROM feather_runs r
+			  WHERE r.config_name = j.name AND r.dry_run = 0
+			  ORDER BY r.started_at DESC LIMIT 1), '')
+		FROM job_configs j
+		ORDER BY j.name`, string(RunSuccess), string(RunPartial))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ConfigHealth
+	for rows.Next() {
+		var (
+			health               ConfigHealth
+			lastSuccess, lastRun sql.NullString
+			status               string
+		)
+		if err := rows.Scan(&health.ConfigName, &health.Enabled, &health.DeleteEnabled,
+			&lastSuccess, &lastRun, &status); err != nil {
+			return nil, err
+		}
+		health.LastStatus = RunStatus(status)
+		if lastSuccess.Valid {
+			if at, err := parseTime(lastSuccess.String); err == nil {
+				health.LastSuccessAt = &at
+			}
+		}
+		if lastRun.Valid {
+			if at, err := parseTime(lastRun.String); err == nil {
+				health.LastRunAt = &at
+			}
+		}
+		out = append(out, health)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Consecutive failures since the last success, per config. Done as a second
+	// pass because expressing "since the last success" inline would need a
+	// window function, and this database is small enough that a second query
+	// costs less than the complexity.
+	failures, err := s.failuresSinceSuccess(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Whether a config is parked is decided by whether it still parses, not by
+	// a column, so it comes from the same place everything else reads it from.
+	broken, err := s.BrokenJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].FailuresSince = failures[out[i].ConfigName]
+		_, out[i].Parked = broken[out[i].ConfigName]
+	}
+	return out, nil
+}
+
+func (s *Store) failuresSinceSuccess(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.config_name, COUNT(*)
+		FROM feather_runs r
+		WHERE r.status = ? AND r.dry_run = 0
+		  AND r.started_at > COALESCE((
+			SELECT MAX(s.started_at) FROM feather_runs s
+			WHERE s.config_name = r.config_name AND s.status IN (?, ?) AND s.dry_run = 0), '')
+		GROUP BY r.config_name`,
+		string(RunFailed), string(RunSuccess), string(RunPartial))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]int64{}
+	for rows.Next() {
+		var name string
+		var count int64
+		if err := rows.Scan(&name, &count); err != nil {
+			return nil, err
+		}
+		out[name] = count
+	}
+	return out, rows.Err()
+}

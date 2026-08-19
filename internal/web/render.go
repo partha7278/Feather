@@ -58,7 +58,11 @@ type pageData struct {
 	CSRF     string
 	Flash    *flash
 	Now      time.Time
-	Data     map[string]any
+	// Refresh, in seconds, makes the page reload itself. Set only while there
+	// is something changing to watch — a run in flight — so that pages sitting
+	// open do not poll the database forever.
+	Refresh int
+	Data    map[string]any
 }
 
 type flash struct {

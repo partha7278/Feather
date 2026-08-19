@@ -430,6 +430,42 @@ make rig-down
 MinIO exercises the same non-AWS code path Oracle needs — custom endpoint,
 path-style addressing, relaxed request checksums.
 
+## Watching it
+
+Three endpoints, none of which need a session:
+
+| Endpoint | Answers |
+|---|---|
+| `/livez` | Is the process up? Touches nothing, so a busy database cannot get feather restarted. |
+| `/readyz` | Can it work? Checks the database answers and the master key opens what is sealed with it. 503 when not. |
+| `/metrics` | Prometheus text format. |
+
+`/healthz` still exists and means `/livez`.
+
+The metric worth an alert is **`feather_config_last_success_age_seconds`**. A
+config that has been failing every night looks identical to a healthy one
+everywhere except the runs page, and only if somebody opens it:
+
+```
+- alert: FeatherRetentionStalled
+  expr: feather_config_last_success_age_seconds > 172800
+  for: 1h
+  annotations:
+    summary: "{{ $labels.config }} has not archived successfully in two days"
+```
+
+A config that has never succeeded is absent from that gauge rather than reported
+as age zero, which would read as "just succeeded". Alongside it are
+`feather_config_consecutive_failures`, `feather_config_parked` (the config no
+longer parses and is not running at all), `feather_config_deletes_source`, and
+the usual totals for documents archived, documents deleted and bytes stored.
+
+**Notifications.** Set a webhook under Settings and feather POSTs one JSON object
+when a run fails. Credentials are stripped from the message on the way out, dry
+runs never notify, and a webhook that is down or slow is logged and ignored —
+the thing that reports outages must not be able to cause them. Tick *notify on
+success* if you would rather have a heartbeat than silence.
+
 ## Notes
 
 - Oracle Cloud is reached through its S3-compatible endpoint. The credentials

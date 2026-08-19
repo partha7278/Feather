@@ -17,6 +17,7 @@ import (
 	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/dest"
 	"github.com/unifers/feather/internal/mongox"
+	"github.com/unifers/feather/internal/notify"
 	"github.com/unifers/feather/internal/runner"
 	"github.com/unifers/feather/internal/scheduler"
 	"github.com/unifers/feather/internal/secrets"
@@ -120,6 +121,11 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 	sched.TrackRunsWith(a.Track)
 	a.Scheduler = sched
 
+	if err := a.applyNotifier(ctx); err != nil {
+		a.Close(ctx)
+		return nil, err
+	}
+
 	// A parked config archives nothing. It must not be a line the operator has
 	// to go looking for, so it is reported at error level, by name, with the
 	// reason — every time the process starts.
@@ -145,6 +151,8 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 const (
 	MetaMaxConcurrentJobs = "max_concurrent_jobs"
 	MetaInstanceName      = "instance_name"
+	MetaWebhookURL        = "notify_webhook_url"
+	MetaNotifyOnSuccess   = "notify_on_success"
 )
 
 // Reload re-reads accounts and configs from the database and swaps them into
@@ -171,8 +179,30 @@ func (a *App) Reload(ctx context.Context) error {
 		return err
 	}
 
+	if err := a.applyNotifier(ctx); err != nil {
+		return err
+	}
+
 	a.Log.Info("configuration reloaded",
 		"mongo_accounts", len(sources), "destinations", len(destinations), "configs", len(jobs))
+	return nil
+}
+
+// applyNotifier reads the notification settings and swaps them into the runner,
+// so a corrected webhook takes effect without a restart.
+func (a *App) applyNotifier(ctx context.Context) error {
+	url, err := a.Store.Meta(ctx, MetaWebhookURL, "")
+	if err != nil {
+		return err
+	}
+	onSuccess, err := a.Store.MetaInt(ctx, MetaNotifyOnSuccess, 0)
+	if err != nil {
+		return err
+	}
+	a.Runner.SetNotifier(notify.New(notify.Settings{
+		WebhookURL: url,
+		OnSuccess:  onSuccess == 1,
+	}, a.Log))
 	return nil
 }
 
@@ -366,4 +396,40 @@ func (a *App) MaxConcurrentJobs(ctx context.Context) int {
 // Describe is a one-line summary for startup logs.
 func (a *App) Describe() string {
 	return fmt.Sprintf("database=%s spool=%s", a.Store.Path(), a.Env.SpoolDir)
+}
+
+// Check is one readiness probe's verdict.
+type Check struct {
+	Name string
+	Err  error
+}
+
+// Ready reports whether feather can actually do its job.
+//
+// The old health endpoint returned a constant string without touching
+// anything, so a feather whose database had been deleted or whose master key
+// had been swapped reported healthy right up until the next run failed. These
+// are the two dependencies whose absence means nothing can be archived.
+func (a *App) Ready(ctx context.Context) []Check {
+	checks := []Check{{Name: "database", Err: a.Store.Ping(ctx)}}
+
+	// A key that does not open what is sealed with it is the failure that
+	// otherwise appears much later, as a decrypt error on whichever account
+	// happened to be read first — by which point the operator is debugging the
+	// wrong thing.
+	checks = append(checks, Check{Name: "master_key", Err: a.Store.CheckMasterKey(ctx)})
+	return checks
+}
+
+// Running is a snapshot of the runs this process owns, by config name and when
+// each started.
+func (a *App) Running() map[string]time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	out := make(map[string]time.Time, len(a.running))
+	for name, started := range a.running {
+		out[name] = started
+	}
+	return out
 }

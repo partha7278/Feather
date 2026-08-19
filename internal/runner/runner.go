@@ -21,6 +21,7 @@ import (
 	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/dest"
 	"github.com/unifers/feather/internal/mongox"
+	"github.com/unifers/feather/internal/notify"
 	"github.com/unifers/feather/internal/retry"
 	"github.com/unifers/feather/internal/store"
 )
@@ -35,6 +36,25 @@ type Runner struct {
 	host     string
 	log      *slog.Logger
 	retry    retry.Policy
+
+	// notify is swapped at runtime when the operator changes the webhook, so
+	// it is read under the mutex rather than captured at construction.
+	notifyMu sync.RWMutex
+	notify   notify.Notifier
+}
+
+// SetNotifier swaps the notification sink. Called at startup and whenever the
+// setting changes, so a corrected webhook takes effect without a restart.
+func (r *Runner) SetNotifier(n notify.Notifier) {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+	r.notify = n
+}
+
+func (r *Runner) notifier() notify.Notifier {
+	r.notifyMu.RLock()
+	defer r.notifyMu.RUnlock()
+	return r.notify
 }
 
 func New(env *config.Env, pool *mongox.Pool, st *store.Store, registry *dest.Registry, log *slog.Logger) *Runner {
@@ -210,7 +230,41 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 		"duration", time.Since(run.StartedAt).Round(time.Second),
 		"error", runErr)
 
+	r.announce(ctx, job, run, runErr)
 	return outcome, runErr
+}
+
+// announce tells whoever is listening how the run ended.
+//
+// A dry run is deliberately silent: it changed nothing, and paging someone
+// about a rehearsal is how people learn to ignore the alerts.
+func (r *Runner) announce(ctx context.Context, job *config.JobConfig, run *store.Run, runErr error) {
+	sink := r.notifier()
+	if sink == nil || job.DryRun {
+		return
+	}
+
+	kind := notify.KindRunSucceeded
+	if run.Status == store.RunFailed || run.Status == store.RunPartial {
+		kind = notify.KindRunFailed
+	}
+
+	message := ""
+	if runErr != nil {
+		message = runErr.Error()
+	}
+	sink.Notify(ctx, notify.Event{
+		Kind:         kind,
+		Host:         r.host,
+		ConfigName:   job.Name,
+		RunID:        run.ID.String(),
+		Status:       string(run.Status),
+		At:           time.Now().UTC(),
+		DocsArchived: run.DocsArchived,
+		DocsDeleted:  run.DocsDeleted,
+		Summary:      notify.Describe(job.Name, string(run.Status), run.DocsArchived, run.DocsDeleted, runErr),
+		Error:        message,
+	})
 }
 
 func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobConfig, run *store.Run, filter, projection bson.D) (*Outcome, error) {

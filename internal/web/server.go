@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/unifers/feather/internal/app"
+	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/store"
 )
 
@@ -122,7 +123,12 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Public.
-	mux.HandleFunc("GET /healthz", s.handleHealth)
+	// /healthz stays as it was, pointing at the liveness check, so anything
+	// already probing it keeps working.
+	mux.HandleFunc("GET /healthz", s.handleLive)
+	mux.HandleFunc("GET /livez", s.handleLive)
+	mux.HandleFunc("GET /readyz", s.handleReady)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	mux.HandleFunc("GET /setup", s.handleSetupForm)
 	mux.HandleFunc("POST /setup", s.handleSetupSubmit)
@@ -286,9 +292,52 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 	}
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+// handleLive answers "is this process running", which is all a liveness probe
+// should ask. It deliberately touches nothing: a liveness check that fails
+// because the database is briefly locked would have the supervisor restart a
+// process whose only problem is that it is busy.
+func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+// handleReady answers "can this process do its job".
+//
+// The old /healthz returned a constant without touching anything, so a feather
+// whose database file had been deleted reported healthy and a load balancer
+// kept sending it traffic. This checks the things whose absence means feather
+// cannot archive: the database answers, and the master key opens what is
+// sealed with it — the second being the failure that otherwise surfaces much
+// later as a confusing decrypt error on whichever account happened to be read
+// first.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	checks := s.app.Ready(ctx)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	var failed []string
+	for _, check := range checks {
+		if check.Err != nil {
+			failed = append(failed, check.Name)
+		}
+	}
+	if len(failed) > 0 {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	for _, check := range checks {
+		if check.Err != nil {
+			// Redacted: this endpoint is unauthenticated, and a connection
+			// error can quote the URI it failed on.
+			fmt.Fprintf(w, "%s: fail: %s\n", check.Name, config.RedactSecrets(check.Err.Error()))
+			continue
+		}
+		fmt.Fprintf(w, "%s: ok\n", check.Name)
+	}
 }
 
 // setupGate forces a fresh installation through the first-run journey. Until an
@@ -297,7 +346,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setupGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path == "/healthz" || strings.HasPrefix(path, "/static/") {
+		if path == "/healthz" || path == "/livez" || path == "/readyz" || path == "/metrics" ||
+			strings.HasPrefix(path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -169,9 +169,17 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only while there is something to watch. A finished run never changes,
+	// and a page left open on one should not keep waking the database.
+	refresh := 0
+	if run.FinishedAt == nil {
+		refresh = 10
+	}
+
 	s.render(w, r, "run_detail", pageData{
-		Title: "Run " + run.ConfigName,
-		Nav:   "runs",
+		Title:   "Run " + run.ConfigName,
+		Nav:     "runs",
+		Refresh: refresh,
 		Data: map[string]any{
 			"Run":       run,
 			"Filter":    filter,

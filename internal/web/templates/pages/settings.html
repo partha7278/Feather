@@ -21,6 +21,23 @@
         <input type="number" id="maxConcurrent" name="maxConcurrent" value="{{.Data.MaxConcurrent}}" min="1" max="16">
         <p class="hint">How many retention jobs may archive at the same time. Takes effect at the next restart.</p>
       </div>
+      <div class="field">
+        <label for="webhookURL">Notification webhook</label>
+        <input type="url" id="webhookURL" name="webhookURL" value="{{.Data.WebhookURL}}"
+               placeholder="https://hooks.example.com/…" aria-describedby="webhookHint">
+        <p class="hint" id="webhookHint">
+          A JSON POST when a run fails. Left blank, feather tells nobody — and the only way
+          to notice a config that has been failing every night is to open the runs page.
+          Dry runs never notify.
+        </p>
+      </div>
+      <div class="field checkbox">
+        <label>
+          <input type="checkbox" name="notifyOnSuccess" value="true" {{if .Data.NotifyOnSuccess}}checked{{end}}>
+          Notify on success as well
+        </label>
+        <p class="hint">Off by default. Turn it on if you would rather have a heartbeat than silence.</p>
+      </div>
       <button class="btn primary" type="submit">Save</button>
     </form>
   </div>

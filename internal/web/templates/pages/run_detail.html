@@ -11,6 +11,22 @@
   </div>
 </div>
 
+{{if not $run.FinishedAt}}
+<div class="notice">
+  <strong>This run is still going.</strong>
+  {{if gt $run.DocsMatched 0}}
+    <span>{{number $run.DocsArchived}} of about {{number $run.DocsMatched}} matching documents archived.</span>
+    <div class="progress" role="progressbar" aria-valuenow="{{$run.Progress}}" aria-valuemin="0" aria-valuemax="100"
+         aria-label="Archiving progress">
+      <div class="progress-bar" style="width:{{$run.Progress}}%"></div>
+    </div>
+  {{else}}
+    <span>Counting matching documents.</span>
+  {{end}}
+  <span class="hint">This page refreshes itself while the run is going.</span>
+</div>
+{{end}}
+
 {{if $run.Error}}
 <div class="notice danger">
   <strong>This run did not complete cleanly</strong>
@@ -20,6 +36,7 @@
 
 <div class="grid stats" style="margin-bottom:18px">
   <div class="stat"><div class="label">Status</div><div class="value" style="font-size:19px"><span class="badge {{statusTone $run.Status}}">{{$run.Status}}</span></div><div class="sub">{{$run.Trigger}}{{if $run.DryRun}} · dry run{{end}}</div></div>
+  <div class="stat"><div class="label">Matched</div><div class="value">{{number $run.DocsMatched}}</div><div class="sub">selected by the filter</div></div>
   <div class="stat"><div class="label">Scanned</div><div class="value">{{number $run.DocsScanned}}</div><div class="sub">documents read</div></div>
   <div class="stat"><div class="label">Archived</div><div class="value">{{number $run.DocsArchived}}</div><div class="sub">in {{$run.Batches}} file(s)</div></div>
   <div class="stat"><div class="label">Deleted</div><div class="value">{{number $run.DocsDeleted}}</div><div class="sub">removed from MongoDB</div></div>

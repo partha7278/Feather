@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,6 +21,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
+	webhookURL, err := s.app.Store.Meta(r.Context(), app.MetaWebhookURL, "")
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	notifyOnSuccess, err := s.app.Store.MetaInt(r.Context(), app.MetaNotifyOnSuccess, 0)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	instanceName, err := s.app.Store.Meta(r.Context(), app.MetaInstanceName, "")
 	if err != nil {
 		s.serverError(w, r, err)
@@ -30,17 +41,19 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		Title: "Settings",
 		Nav:   "settings",
 		Data: map[string]any{
-			"Admins":        admins,
-			"InstanceName":  instanceName,
-			"MaxConcurrent": s.app.MaxConcurrentJobs(r.Context()),
-			"MinPassword":   store.MinPasswordLength,
-			"MinPassphrase": bundle.MinPassphraseLength,
-			"DatabasePath":  s.app.Store.Path(),
-			"SpoolDir":      s.app.Env.SpoolDir,
-			"DataDir":       s.app.Env.DataDir,
-			"MasterKeyPath": s.app.Env.MasterKeyPath,
-			"MasterKeyEnv":  s.app.Env.MasterKey != "",
-			"Host":          s.app.Host,
+			"Admins":          admins,
+			"InstanceName":    instanceName,
+			"MaxConcurrent":   s.app.MaxConcurrentJobs(r.Context()),
+			"MinPassword":     store.MinPasswordLength,
+			"MinPassphrase":   bundle.MinPassphraseLength,
+			"DatabasePath":    s.app.Store.Path(),
+			"SpoolDir":        s.app.Env.SpoolDir,
+			"DataDir":         s.app.Env.DataDir,
+			"WebhookURL":      webhookURL,
+			"NotifyOnSuccess": notifyOnSuccess == 1,
+			"MasterKeyPath":   s.app.Env.MasterKeyPath,
+			"MasterKeyEnv":    s.app.Env.MasterKey != "",
+			"Host":            s.app.Host,
 		},
 	})
 }
@@ -65,6 +78,35 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.app.Store.SetMeta(r.Context(), app.MetaMaxConcurrentJobs, strconv.Itoa(maxConcurrent)); err != nil {
 		s.serverError(w, r, err)
+		return
+	}
+
+	webhook := strings.TrimSpace(f.Raw("webhookURL"))
+	if webhook != "" {
+		// Checked here rather than at delivery time, where the only symptom
+		// would be a warning in a log nobody is reading — which is the exact
+		// failure notifications exist to prevent.
+		parsed, err := url.Parse(webhook)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			s.setFlash(w, "error", "The notification webhook must be a full http:// or https:// URL.")
+			http.Redirect(w, r, "/settings", http.StatusSeeOther)
+			return
+		}
+	}
+	if err := s.app.Store.SetMeta(r.Context(), app.MetaWebhookURL, webhook); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if err := s.app.Store.SetMeta(r.Context(), app.MetaNotifyOnSuccess, boolMeta(f.Bool("notifyOnSuccess"))); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+
+	if err := s.app.Reload(r.Context()); err != nil {
+		s.log.Error("settings saved but could not be applied", "error", err)
+		s.setFlash(w, "error", "Settings were saved but could not be applied to the running process: %s",
+			config.RedactSecrets(err.Error()))
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
 		return
 	}
 
@@ -217,4 +259,12 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// boolMeta stores a checkbox as the "1"/"0" the meta table uses.
+func boolMeta(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }

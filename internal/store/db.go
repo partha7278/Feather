@@ -385,3 +385,38 @@ func (s *Store) Backup(ctx context.Context, path string) (int64, error) {
 	}
 	return info.Size(), nil
 }
+
+// Ping confirms the database is reachable and answering queries.
+func (s *Store) Ping(ctx context.Context) error {
+	var one int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil {
+		return fmt.Errorf("database is not answering: %w", err)
+	}
+	return nil
+}
+
+// CheckMasterKey confirms the current key still opens what was sealed with it.
+//
+// A mismatched key — a restored database beside the wrong key file, or an
+// operator who regenerated one — otherwise stays hidden until the next run
+// tries to read a connection string, and surfaces as a decrypt error on
+// whichever account happened to be queried first. Failing at the door instead
+// says what is actually wrong.
+//
+// An installation with nothing sealed yet passes: there is nothing to be wrong
+// about.
+func (s *Store) CheckMasterKey(ctx context.Context) error {
+	var sealed []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT uri_enc FROM mongo_sources ORDER BY alias LIMIT 1`).Scan(&sealed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := s.secrets.Open(sealed); err != nil {
+		return fmt.Errorf("the master key does not open the credentials in this database: %w", err)
+	}
+	return nil
+}
