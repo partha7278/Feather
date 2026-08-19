@@ -35,6 +35,12 @@ const (
 	AuditDriveConnected    = "destination.drive_connected"
 	AuditDriveDisconnected = "destination.drive_disconnected"
 
+	// Reading an archive is worth recording too: it is how the data leaves
+	// feather, and "who pulled the January orders?" is a question someone
+	// eventually asks.
+	AuditArchiveDownloaded = "archive.downloaded"
+	AuditDatabaseBackedUp  = "settings.backup_taken"
+
 	AuditSettingsSaved  = "settings.saved"
 	AuditBundleExported = "settings.bundle_exported"
 	AuditBundleImported = "settings.bundle_imported"

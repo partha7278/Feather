@@ -164,6 +164,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /configs/{id}/delete", s.guard(s.handleConfigDelete))
 
 	mux.HandleFunc("GET /backups", s.guard(s.handleBackups))
+	mux.HandleFunc("GET /backups/{id}/download", s.guard(s.handleArtifactDownload))
 	mux.HandleFunc("GET /runs", s.guard(s.handleRuns))
 	mux.HandleFunc("GET /audit", s.guard(s.handleAudit))
 	mux.HandleFunc("GET /runs/{id}", s.guard(s.handleRunDetail))
@@ -173,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/password", s.guard(s.handlePasswordChange))
 	mux.HandleFunc("POST /settings/admins", s.guard(s.handleAdminCreate))
 	mux.HandleFunc("POST /settings/admins/{id}/delete", s.guard(s.handleAdminDelete))
+	mux.HandleFunc("POST /settings/backup", s.guard(s.handleSettingsBackup))
 	mux.HandleFunc("POST /settings/export", s.guard(s.handleSettingsExport))
 	mux.HandleFunc("POST /settings/import", limitBody(maxBundleBytes, s.guard(s.handleSettingsImport)))
 

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/unifers/feather/internal/retry"
 )
 
 // Destination is one place archives are written. Feather treats every provider
@@ -93,7 +95,7 @@ func VerifyByReading(ctx context.Context, d Destination, obj StoredObject) error
 		// Refusing is the only safe answer. A missing expected digest means
 		// there is nothing to compare against, and "nothing to compare" must
 		// never read as "matches".
-		return fmt.Errorf("verifying %s (%s): no expected checksum to compare against", d.Alias(), obj.Key)
+		return retry.Permanent(fmt.Errorf("verifying %s (%s): no expected checksum to compare against", d.Alias(), obj.Key))
 	}
 
 	body, err := d.Open(ctx, obj.Key, obj.Handle)
@@ -108,13 +110,17 @@ func VerifyByReading(ctx context.Context, d Destination, obj StoredObject) error
 		return fmt.Errorf("verifying %s (%s): reading the stored copy: %w", d.Alias(), obj.Key, err)
 	}
 
+	// A copy that read cleanly and came out wrong will come out wrong again:
+	// the bytes in the bucket are the bytes in the bucket. Marking these
+	// permanent stops feather re-downloading a large object two more times to
+	// reach the same verdict, and reports the real problem immediately.
 	if read != obj.Size {
-		return fmt.Errorf("verifying %s (%s): stored copy is %d bytes, expected %d",
-			d.Alias(), obj.Key, read, obj.Size)
+		return retry.Permanent(fmt.Errorf("verifying %s (%s): stored copy is %d bytes, expected %d",
+			d.Alias(), obj.Key, read, obj.Size))
 	}
 	if got := hex.EncodeToString(hash.Sum(nil)); !strings.EqualFold(got, obj.SHA256) {
-		return fmt.Errorf("verifying %s (%s): stored copy hashes to %s, expected %s",
-			d.Alias(), obj.Key, got, obj.SHA256)
+		return retry.Permanent(fmt.Errorf("verifying %s (%s): stored copy hashes to %s, expected %s",
+			d.Alias(), obj.Key, got, obj.SHA256))
 	}
 	return nil
 }

@@ -325,8 +325,12 @@ func (s *Store) RunFilter(ctx context.Context, id uuid.UUID) (string, error) {
 
 // ArtifactQuery narrows the backup listing.
 type ArtifactQuery struct {
-	ConfigName  string
-	RunID       string
+	ConfigName string
+	RunID      string
+	ArtifactID string
+	// Ascending lists oldest first, which is the order a restore replays them
+	// in. The UI wants newest first, so that stays the default.
+	Ascending   bool
 	Search      string // matches file name or object key
 	DeletedOnly bool
 	Limit       int
@@ -353,6 +357,10 @@ func (s *Store) Artifacts(ctx context.Context, q ArtifactQuery) ([]ArtifactWithC
 		where = append(where, "run_id = ?")
 		args = append(args, q.RunID)
 	}
+	if q.ArtifactID != "" {
+		where = append(where, "id = ?")
+		args = append(args, q.ArtifactID)
+	}
 	if q.DeletedOnly {
 		where = append(where, "deleted_from_source = 1")
 	}
@@ -374,9 +382,15 @@ func (s *Store) Artifacts(ctx context.Context, q ArtifactQuery) ([]ArtifactWithC
 	if limit <= 0 {
 		limit = 50
 	}
+	// Newest first for the listing; oldest first for a restore, which replays
+	// batches in the order they were written.
+	order := ` ORDER BY created_at DESC, batch_seq DESC`
+	if q.Ascending {
+		order = ` ORDER BY created_at ASC, batch_seq ASC`
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+artifactColumns+` FROM feather_artifacts WHERE `+clause+
-			` ORDER BY created_at DESC, batch_seq DESC LIMIT ? OFFSET ?`,
+			order+` LIMIT ? OFFSET ?`,
 		append(args, limit, q.Offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -550,3 +564,33 @@ func (s *Store) StorageByDestination(ctx context.Context) ([]DestinationUsage, e
 	}
 	return out, rows.Err()
 }
+
+// ArtifactByID fetches one archive file with every recorded copy, for the
+// verify and restore paths.
+func (s *Store) ArtifactByID(ctx context.Context, id uuid.UUID) (ArtifactWithCopies, error) {
+	found, _, err := s.Artifacts(ctx, ArtifactQuery{ArtifactID: id.String(), Limit: 1})
+	if err != nil {
+		return ArtifactWithCopies{}, err
+	}
+	if len(found) == 0 {
+		return ArtifactWithCopies{}, ErrNotFound
+	}
+	return found[0], nil
+}
+
+// ArtifactsForRun lists every archive one run produced, oldest batch first —
+// which is the order a restore should replay them in.
+func (s *Store) ArtifactsForRun(ctx context.Context, runID uuid.UUID) ([]ArtifactWithCopies, error) {
+	found, _, err := s.Artifacts(ctx, ArtifactQuery{RunID: runID.String(), Limit: allArtifacts, Ascending: true})
+	return found, err
+}
+
+// ArtifactsForConfig lists every archive one config has ever written.
+func (s *Store) ArtifactsForConfig(ctx context.Context, configName string) ([]ArtifactWithCopies, error) {
+	found, _, err := s.Artifacts(ctx, ArtifactQuery{ConfigName: configName, Limit: allArtifacts, Ascending: true})
+	return found, err
+}
+
+// allArtifacts is the limit used when the caller genuinely wants all of them —
+// a scrub, or a restore of a whole run.
+const allArtifacts = 100000

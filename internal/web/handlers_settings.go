@@ -1,11 +1,16 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/unifers/feather/internal/app"
 	"github.com/unifers/feather/internal/bundle"
+	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/store"
 )
 
@@ -32,6 +37,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"MinPassphrase": bundle.MinPassphraseLength,
 			"DatabasePath":  s.app.Store.Path(),
 			"SpoolDir":      s.app.Env.SpoolDir,
+			"DataDir":       s.app.Env.DataDir,
 			"MasterKeyPath": s.app.Env.MasterKeyPath,
 			"MasterKeyEnv":  s.app.Env.MasterKey != "",
 			"Host":          s.app.Host,
@@ -154,4 +160,61 @@ func (s *Server) handleAdminDelete(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("administrator removed", "id", id, "by", user.Email)
 	s.setFlash(w, "ok", "Administrator removed.")
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+}
+
+// handleSettingsBackup writes a consistent snapshot of feather's own database.
+//
+// This is deliberately separate from Export. An export bundle is a portable
+// copy of the configuration — accounts, destinations, retention rules — and is
+// what you carry to another machine. A backup is the whole state, catalogue and
+// administrator logins included, and is what you restore from after losing the
+// server. The README used to describe copying the file, which is wrong while
+// feather is running: this takes the snapshot properly.
+func (s *Server) handleSettingsBackup(w http.ResponseWriter, r *http.Request) {
+	f, err := newForm(r)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+
+	path := strings.TrimSpace(f.Raw("path"))
+	if path == "" {
+		path = filepath.Join(filepath.Dir(s.app.Store.Path()),
+			"feather-backup-"+time.Now().UTC().Format("20060102T150405Z")+".db")
+	}
+	if !filepath.IsAbs(path) {
+		s.setFlash(w, "error", "Give the full path to write the backup to.")
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+
+	size, err := s.app.Store.Backup(r.Context(), path)
+	if err != nil {
+		s.setFlash(w, "error", "%s", config.RedactSecrets(err.Error()))
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+
+	s.audit(r, store.AuditDatabaseBackedUp, "instance", path, humanBytes(size))
+	s.log.Info("database backup written", "by", currentUserEmail(r), "path", path, "bytes", size)
+
+	// Said every time. A backup without the key cannot be opened, and that is
+	// the failure people discover at the worst possible moment.
+	s.setFlash(w, "success", "Wrote %s (%s). It needs the master key at %s to be read — keep a copy of that key with it.",
+		path, humanBytes(size), s.app.Env.MasterKeyPath)
+	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+}
+
+// humanBytes formats a size the way an operator reads one.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for size := n / unit; size >= unit; size /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

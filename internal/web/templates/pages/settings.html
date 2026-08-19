@@ -47,10 +47,44 @@
 <div class="card">
   <div class="card-head">
     <div>
+      <h2>Backup</h2>
+      <p class="hint">
+        A consistent snapshot of feather's whole database — the archive catalogue, the
+        administrator logins and the sealed credentials — taken while feather keeps running.
+        This is what you restore from after losing the server. Copying the database file
+        instead is not safe: it is written ahead of itself, so a plain copy captures a
+        half-finished state.
+      </p>
+    </div>
+  </div>
+
+  <form method="post" action="/settings/backup">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="backupPath">Write to</label>
+    <input type="text" id="backupPath" name="path" placeholder="{{.Data.DataDir}}/feather-backup-….db"
+           aria-describedby="backupPathHint">
+    <p class="hint" id="backupPathHint">
+      A full path on the server. Left blank, feather names one with today's date beside the
+      database. An existing file is never overwritten.
+    </p>
+    <button type="submit" class="btn">Write a backup</button>
+  </form>
+
+  <p class="hint warn">
+    The backup needs the master key at <code>{{.Data.MasterKeyPath}}</code> to be read.
+    Keep a copy of that key wherever you keep the backup — without it the file cannot be opened,
+    and neither can the archives it points to.
+  </p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
       <h2>Export &amp; import</h2>
       <p class="hint">
         Every MongoDB account, every destination, every retention config and the settings above,
-        as one file. Move an installation to another server, or keep a copy beside your backups.
+        as one file. This is for moving an installation to another server — it deliberately does
+        not carry the archive catalogue or the administrator logins, so it is not a backup.
       </p>
     </div>
   </div>

@@ -3,7 +3,12 @@
 //
 // It is one SQLite file. That is a deliberate fit for the target deployment —
 // a VPS running one feather process — and it means a backup of feather itself
-// is a file copy.
+// is a single file.
+//
+// Not a `cp`, though. The database runs in WAL mode with a live writer, so
+// copying the file on its own captures a torn state missing every transaction
+// that has not been checkpointed. Use Store.Backup, which is VACUUM INTO: a
+// consistent snapshot taken while feather keeps running.
 package store
 
 import (
@@ -93,10 +98,15 @@ func Open(ctx context.Context, path string, box *secrets.Box) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
-	// The file holds cloud credentials, even sealed ones.
-	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
-		_ = db.Close()
-		return nil, fmt.Errorf("securing %s: %w", path, err)
+	// The file holds cloud credentials, even sealed ones — and so do the WAL
+	// and shared-memory sidecars SQLite creates beside it, which it makes
+	// under the process umask. Chmodding only the main file left the same
+	// ciphertext world-readable in feather.db-wal.
+	for _, name := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(name, 0o600); err != nil && !os.IsNotExist(err) {
+			_ = db.Close()
+			return nil, fmt.Errorf("securing %s: %w", name, err)
+		}
 	}
 
 	return &Store{db: db, secrets: box, path: path}, nil
@@ -314,4 +324,64 @@ func truncate(s string, max int) string {
 		cut--
 	}
 	return s[:cut] + "…"
+}
+
+// Backup writes a consistent snapshot of the whole database to path, using
+// VACUUM INTO.
+//
+// This exists because the obvious thing is wrong. feather's database is WAL
+// mode with a live writer, so `cp feather.db` captures the main file without
+// the write-ahead log — a torn state missing every committed-but-not-yet-
+// checkpointed transaction, which is exactly the recent history an operator
+// taking a backup cares about. VACUUM INTO reads through a transaction, so the
+// output is a coherent database as of one instant, and feather keeps archiving
+// throughout.
+//
+// The result is also compacted, and it is the complete state: the catalogue,
+// the administrator logins and the sealed credentials, which the export bundle
+// deliberately does not carry.
+//
+// It still needs the master key to be read. That is the point of the key, and
+// it means a restore needs both.
+func (s *Store) Backup(ctx context.Context, path string) (int64, error) {
+	if strings.TrimSpace(path) == "" {
+		return 0, errors.New("no backup path given")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return 0, fmt.Errorf("resolving %s: %w", path, err)
+	}
+	if absolute == s.path {
+		return 0, errors.New("the backup path is the live database")
+	}
+	if dir := filepath.Dir(absolute); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return 0, fmt.Errorf("creating %s: %w", dir, err)
+		}
+	}
+	// VACUUM INTO refuses to overwrite, which is the behaviour worth keeping:
+	// silently replacing yesterday's backup with a broken one is how people
+	// discover they have no backups. Say so rather than letting SQLite's
+	// wording explain it.
+	if _, err := os.Stat(absolute); err == nil {
+		return 0, fmt.Errorf("%s already exists — backups are never overwritten, so move it aside or choose another name", absolute)
+	} else if !os.IsNotExist(err) {
+		return 0, err
+	}
+
+	// Not parameterised: SQLite does not bind the VACUUM INTO target. The path
+	// is quoted as a SQL string literal instead, doubling any embedded quote.
+	quoted := "'" + strings.ReplaceAll(absolute, "'", "''") + "'"
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO `+quoted); err != nil {
+		return 0, fmt.Errorf("writing the backup to %s: %w", absolute, err)
+	}
+	if err := os.Chmod(absolute, 0o600); err != nil {
+		return 0, fmt.Errorf("securing %s: %w", absolute, err)
+	}
+
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }

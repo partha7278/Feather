@@ -3,12 +3,18 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/store"
 )
 
@@ -192,4 +198,79 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func contextWithTimeout(r *http.Request, timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), timeout)
+}
+
+// handleArtifactDownload streams one archive back to the browser.
+//
+// The catalogue could always say where a copy was; it could not hand it to you.
+// For an operator answering "what was in the January orders?", downloading the
+// file is the shortest path there is — and it is the same read path `feather
+// verify` uses, so a download that succeeds is also a check that the copy is
+// still intact.
+func (s *Server) handleArtifactDownload(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.notFound(w, r)
+		return
+	}
+
+	item, err := s.app.Store.ArtifactByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.notFound(w, r)
+			return
+		}
+		s.serverError(w, r, err)
+		return
+	}
+
+	body, alias, err := s.openArchive(r.Context(), item)
+	if err != nil {
+		s.setFlash(w, "error", "%s could not be downloaded: %s", item.FileName, config.RedactSecrets(err.Error()))
+		http.Redirect(w, r, "/backups", http.StatusSeeOther)
+		return
+	}
+	defer func() { _ = body.Close() }()
+
+	s.audit(r, store.AuditArchiveDownloaded, "archive", item.ID.String(),
+		fmt.Sprintf("%s from %s", item.FileName, alias))
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(item.FileName)+`"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	if item.BytesCompressed > 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(item.BytesCompressed))
+	}
+
+	if _, err := io.Copy(w, body); err != nil {
+		// The status line is long gone, so there is nowhere to report this to
+		// the browser. The log is the only honest record that the download was
+		// truncated.
+		s.log.Warn("archive download did not complete",
+			"archive", item.FileName, "destination", alias, "error", err)
+	}
+}
+
+// openArchive finds a readable copy of an archive, trying each destination in
+// turn so one broken bucket does not make the file unreachable.
+func (s *Server) openArchive(ctx context.Context, item store.ArtifactWithCopies) (io.ReadCloser, string, error) {
+	if len(item.Copies) == 0 {
+		return nil, "", fmt.Errorf("no copies of %s are recorded", item.FileName)
+	}
+	var failures []string
+	for _, copy := range item.Copies {
+		target, err := s.app.Registry.Get(copy.Alias)
+		if err != nil {
+			failures = append(failures, copy.Alias+": no longer configured")
+			continue
+		}
+		body, err := target.Open(ctx, copy.ObjectKey, copy.ETag)
+		if err != nil {
+			failures = append(failures, copy.Alias+": "+err.Error())
+			continue
+		}
+		return body, copy.Alias, nil
+	}
+	return nil, "", errors.New(strings.Join(failures, "; "))
 }

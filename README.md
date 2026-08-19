@@ -8,7 +8,8 @@ config says so — deletes them from MongoDB. Every archive is catalogued, so
 
 - **One database.** Accounts, retention configs, the administrator login, and
   the catalogue of every file ever written all live in a single SQLite file.
-  Backing feather up is a file copy.
+  `feather backup` writes a consistent snapshot of it while feather keeps
+  running.
 - **A control panel.** Add MongoDB accounts and S3, Oracle or Google Drive
   destinations, write retention rules, watch runs, and browse every archive from
   the browser. Changes take effect without a restart.
@@ -219,6 +220,9 @@ feather serve                    # control panel + scheduler (the usual way)
 feather daemon                   # scheduler only, no web UI
 feather run <config> [--dry-run]
 feather validate                 # check accounts, configs, connectivity; print matched counts
+feather verify <run|archive|config>      # re-read stored archives, confirm they are intact
+feather restore <run|archive|config> [--into db.coll] [--dry-run]
+feather backup <file>            # consistent snapshot of feather's own database
 feather list                     # configs, schedules, last run status
 feather export <file>            # every account, config and setting, as one file
 feather import-bundle <file>     # read one back in
@@ -231,6 +235,30 @@ feather keygen
 Always `validate` and then `--dry-run` before the first real run of a config
 that deletes. A dry run reads and compresses everything, reports exactly what it
 would upload and delete, and touches neither the destinations nor MongoDB.
+
+## Backing feather up
+
+feather's own state — the catalogue, the administrator logins, the sealed
+credentials — is one SQLite file. Copying that file while feather is running is
+**not** a backup: it is written ahead of itself in WAL mode, so a plain `cp`
+captures a torn state missing the most recent transactions.
+
+```bash
+feather backup /var/backups/feather-$(date -u +%Y%m%dT%H%M%SZ).db
+```
+
+That takes a consistent snapshot through a transaction, so feather can keep
+archiving while it runs. The same thing is a button under **Settings → Backup**.
+An existing file is never overwritten.
+
+**The snapshot needs the master key to be read.** Keep a copy of the key
+wherever you keep the backups; a restore needs both. Restoring is putting the
+file back at `FEATHER_DATA_DIR/feather.db` with the key beside it and starting
+feather.
+
+Note the division of labour: a **backup** is the whole state and is what you
+restore from, while an **export bundle** (below) is a portable copy of the
+configuration and deliberately carries neither the catalogue nor the logins.
 
 ## Moving an installation
 
@@ -327,6 +355,41 @@ file), `feather_artifact_destinations` (one per copy), alongside `mongo_sources`
 `destinations`, `job_configs` and `admin_users`.
 
 ## Restoring
+
+```bash
+feather restore <run id> --dry-run     # read every archive, check it, write nothing
+feather restore <run id>               # put the documents back where they came from
+feather restore <run id> --into shop.orders_recovered
+```
+
+A restore reads each archive back, hashes it as it goes, and refuses to write
+anything if the digest does not match what the catalogue recorded — so a copy
+that has rotted, been overwritten, or been expired by a lifecycle rule fails
+loudly instead of returning wrong data. Documents that are already present are
+counted, not treated as errors, so restoring twice converges rather than failing
+halfway.
+
+Take the same target one step further with `--into` when you want the documents
+somewhere they cannot collide with live data before you look at them.
+
+### Checking archives without restoring
+
+```bash
+feather verify <run id>          # or an archive id, or a config name
+```
+
+`verify` re-reads every stored copy of every archive it names and confirms each
+one still hashes to what the catalogue says. Verification happens once at write
+time; nothing after that ever looked at the object again, so bit-rot, an
+accidental bucket delete and a lifecycle rule expiring an archive were all
+invisible until somebody needed the data. Run it on a schedule against the
+configs that delete, and it finds those while another copy still exists to
+repair from.
+
+It exits non-zero when an archive has no readable copy left — which is the
+condition worth alerting on, rather than any single copy failing.
+
+### By hand
 
 Archives are gzipped NDJSON in canonical Extended JSON, which `mongoimport`
 reads directly. ObjectId, Date, Decimal128 and int32-vs-int64 all survive the

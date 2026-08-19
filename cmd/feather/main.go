@@ -24,6 +24,8 @@ import (
 	// the system copy is still preferred when there is one.
 	_ "time/tzdata"
 
+	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"golang.org/x/term"
 
 	"github.com/unifers/feather/internal/app"
@@ -33,6 +35,7 @@ import (
 	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/logging"
 	"github.com/unifers/feather/internal/mongox"
+	"github.com/unifers/feather/internal/restore"
 	"github.com/unifers/feather/internal/secrets"
 	"github.com/unifers/feather/internal/store"
 	"github.com/unifers/feather/internal/web"
@@ -50,6 +53,11 @@ Usage:
   feather run <config> [--dry-run]
                                  Run one retention config immediately
   feather validate               Check accounts, configs and connectivity
+  feather verify <run|archive|config>
+                                 Re-read stored archives and check they are intact
+  feather restore <run|archive|config> [--into db.coll] [--dry-run]
+                                 Put archived documents back into MongoDB
+  feather backup <file>          Write a consistent snapshot of feather's database
   feather list                   Show configs, schedules and last run status
   feather export <file>          Write every account, config and setting to one bundle
   feather import-bundle <file>   Read a bundle written by "feather export" back in
@@ -71,6 +79,8 @@ Flags:
   --no-secrets       Export without credentials, so no passphrase is needed
   --overwrite        Let import-bundle replace accounts and configs already here
   --skip-settings    Leave this instance's name and concurrency cap alone
+  --into <db.coll>   Restore into this collection instead of the original
+  --from <alias>     Restore from this destination instead of the first readable one
 `
 
 func main() {
@@ -104,6 +114,8 @@ func run() error {
 	noSecrets := flags.Bool("no-secrets", false, "export without credentials")
 	overwrite := flags.Bool("overwrite", false, "replace entries that already exist")
 	skipSettings := flags.Bool("skip-settings", false, "do not apply instance settings from the bundle")
+	restoreInto := flags.String("into", "", "restore into this database.collection")
+	restoreFrom := flags.String("from", "", "restore or verify using this destination alias")
 
 	args := os.Args[2:]
 	// Several commands take a positional argument before their flags.
@@ -169,6 +181,23 @@ func run() error {
 		return runOnce(ctx, env, log, positional, *dryRun)
 	case "validate":
 		return runValidate(ctx, env, log)
+	case "verify":
+		if positional == "" {
+			return errors.New("usage: feather verify <run id | archive id | config name>")
+		}
+		return runVerify(ctx, env, log, positional)
+	case "restore":
+		if positional == "" {
+			return errors.New("usage: feather restore <run id | archive id | config name> [--into db.collection] [--dry-run]")
+		}
+		return runRestore(ctx, env, log, positional, restoreOptions{
+			into: *restoreInto, from: *restoreFrom, dryRun: *dryRun,
+		})
+	case "backup":
+		if positional == "" {
+			return errors.New("usage: feather backup <file>")
+		}
+		return runBackup(ctx, env, log, positional)
 	case "list":
 		return runList(ctx, env, log)
 	case "migrate":
@@ -774,4 +803,252 @@ func yesNo(v bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// runVerify re-reads archives and confirms they are still what the catalogue
+// says they are.
+//
+// Nothing in feather looked at an object again after the run that wrote it, so
+// bit-rot, a lifecycle rule, an accidental bucket delete and a wrong-key
+// overwrite were all invisible until someone needed the data. This is the
+// scrub that finds them while there is still another copy to repair from.
+func runVerify(ctx context.Context, env *config.Env, log *slog.Logger, target string) error {
+	a, err := app.Open(ctx, env, log)
+	if err != nil {
+		return err
+	}
+	defer a.Close(ctx)
+
+	artifacts, label, err := resolveArtifacts(ctx, a, target)
+	if err != nil {
+		return err
+	}
+	if len(artifacts) == 0 {
+		return fmt.Errorf("no archives found for %s", label)
+	}
+
+	fmt.Printf("Verifying %d archive(s) from %s.\n\n", len(artifacts), label)
+
+	out := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(out, "ARCHIVE\tDESTINATION\tRESULT\tDETAIL")
+
+	var intact, damaged int
+	for _, item := range artifacts {
+		result := restore.VerifyArtifact(ctx, log, a.Registry, item.Artifact, item.Copies)
+		for _, copy := range result.Copies {
+			detail := ""
+			if copy.Err != nil {
+				detail = firstLine(copy.Err.Error())
+			}
+			fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", item.FileName, copy.Alias, copy.Status, detail)
+		}
+		if result.Intact() {
+			intact++
+		} else {
+			damaged++
+		}
+	}
+	_ = out.Flush()
+
+	fmt.Printf("\n%d archive(s) have at least one good copy", intact)
+	if damaged > 0 {
+		// The distinction that matters after a deletion is not "every copy is
+		// fine" but "the data is still somewhere". An archive with no readable
+		// copy whose documents were deleted is unrecoverable, and saying so
+		// plainly is more use than a count.
+		fmt.Printf(", %d have none", damaged)
+	}
+	fmt.Println(".")
+
+	if damaged > 0 {
+		return fmt.Errorf("%d archive(s) could not be read back from any destination", damaged)
+	}
+	return nil
+}
+
+// runRestore puts archived documents back into MongoDB.
+func runRestore(ctx context.Context, env *config.Env, log *slog.Logger, target string, opts restoreOptions) error {
+	a, err := app.Open(ctx, env, log)
+	if err != nil {
+		return err
+	}
+	defer a.Close(ctx)
+
+	artifacts, label, err := resolveArtifacts(ctx, a, target)
+	if err != nil {
+		return err
+	}
+	if len(artifacts) == 0 {
+		return fmt.Errorf("no archives found for %s", label)
+	}
+
+	into, description, err := resolveRestoreTarget(ctx, a, artifacts, opts)
+	if err != nil {
+		return err
+	}
+
+	verb := "Restoring"
+	if opts.dryRun {
+		verb = "Reading (dry run, nothing will be written)"
+	}
+	fmt.Printf("%s %d archive(s) from %s into %s.\n\n", verb, len(artifacts), label, description)
+
+	var totalRead, totalInserted, totalPresent int64
+	for _, item := range artifacts {
+		result, err := restore.Artifact(ctx, log, a.Registry, into, item.Artifact, item.Copies, restore.Options{
+			DryRun:      opts.dryRun,
+			PreferAlias: opts.from,
+		})
+		totalRead += result.DocumentsRead
+		totalInserted += result.Inserted
+		totalPresent += result.AlreadyPresent
+		if err != nil {
+			return fmt.Errorf("restoring %s: %w", item.FileName, err)
+		}
+		fmt.Printf("  %-52s %7d docs from %s\n", item.FileName, result.DocumentsRead, result.ReadFrom)
+	}
+
+	fmt.Printf("\n%d documents read", totalRead)
+	if opts.dryRun {
+		fmt.Println(". Nothing was written.")
+		return nil
+	}
+	fmt.Printf(", %d inserted", totalInserted)
+	if totalPresent > 0 {
+		// Not an error: it means the source was never deleted, or this archive
+		// has been restored before. Restoring has to be repeatable.
+		fmt.Printf(", %d already present", totalPresent)
+	}
+	fmt.Println(".")
+	return nil
+}
+
+type restoreOptions struct {
+	into   string // "db.collection", empty means where they came from
+	from   string // destination alias to read from
+	dryRun bool
+}
+
+// resolveRestoreTarget works out which collection to write into, and refuses
+// the ambiguous case rather than guessing.
+func resolveRestoreTarget(ctx context.Context, a *app.App, artifacts []store.ArtifactWithCopies, opts restoreOptions) (*mongo.Collection, string, error) {
+	if opts.dryRun {
+		return nil, "nowhere", nil
+	}
+
+	database, collection := artifacts[0].Database, artifacts[0].Collection
+	if opts.into != "" {
+		parts := strings.SplitN(opts.into, ".", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, "", fmt.Errorf("--into wants database.collection, not %q", opts.into)
+		}
+		database, collection = parts[0], parts[1]
+	} else {
+		// Restoring a mixed set into the collection of whichever archive
+		// happened to sort first would scatter documents into the wrong place
+		// silently. Make the operator say where.
+		for _, item := range artifacts {
+			if item.Database != database || item.Collection != collection {
+				return nil, "", fmt.Errorf(
+					"these archives came from more than one collection (%s.%s and %s.%s) — name one with --into database.collection",
+					database, collection, item.Database, item.Collection)
+			}
+		}
+	}
+
+	// Which MongoDB account to write through: the one the config reads, since
+	// that is the cluster these documents came from.
+	alias := opts.from
+	if alias == "" {
+		record, err := a.Store.JobByName(ctx, artifacts[0].ConfigName)
+		if err != nil {
+			return nil, "", fmt.Errorf(
+				"config %q is gone, so feather cannot tell which MongoDB account to restore through — recreate it, or restore by hand with mongoimport: %w",
+				artifacts[0].ConfigName, err)
+		}
+		alias = record.Config.Source.MongoSource
+	}
+
+	client, err := a.Mongo.Get(ctx, alias)
+	if err != nil {
+		return nil, "", err
+	}
+	target, err := client.Collection(database, collection, "")
+	if err != nil {
+		return nil, "", err
+	}
+	return target, database + "." + collection + " on " + alias, nil
+}
+
+// resolveArtifacts turns what the operator typed — a run id, an artifact id, or
+// a config name — into the archives it names.
+func resolveArtifacts(ctx context.Context, a *app.App, target string) ([]store.ArtifactWithCopies, string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, "", errors.New("name a run id, an archive id, or a config")
+	}
+
+	if id, err := uuid.Parse(target); err == nil {
+		// A UUID is either a run or a single archive. Try the run first: it is
+		// what the catalogue and the panel both show most prominently.
+		if found, err := a.Store.ArtifactsForRun(ctx, id); err == nil && len(found) > 0 {
+			return found, "run " + target, nil
+		}
+		item, err := a.Store.ArtifactByID(ctx, id)
+		if err == nil {
+			return []store.ArtifactWithCopies{item}, "archive " + item.FileName, nil
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, "", fmt.Errorf("no run or archive has the id %s", target)
+		}
+		return nil, "", err
+	}
+
+	found, err := a.Store.ArtifactsForConfig(ctx, target)
+	if err != nil {
+		return nil, "", err
+	}
+	return found, "config " + target, nil
+}
+
+// runBackup writes a consistent snapshot of feather's own database.
+func runBackup(ctx context.Context, env *config.Env, log *slog.Logger, path string) error {
+	a, err := app.Open(ctx, env, log)
+	if err != nil {
+		return err
+	}
+	defer a.Close(ctx)
+
+	size, err := a.Store.Backup(ctx, path)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Wrote %s (%s).\n", path, humanBytes(size))
+	// Said every time, because a backup taken without the key is not a backup:
+	// the credentials in it cannot be opened, and neither can the archives
+	// they reach.
+	fmt.Printf("\nThis file needs the master key at %s to be read.\nKeep a copy of that key wherever you keep this backup.\n", env.MasterKeyPath)
+	return nil
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// humanBytes formats a size the way an operator reads one.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for size := n / unit; size >= unit; size /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

@@ -74,6 +74,9 @@
           </td>
           <td class="actions small nowrap">
             <a href="/runs/{{.RunID}}">run details</a>
+            {{if .Copies}}
+              <a href="/backups/{{.ID}}/download" title="Download this archive from the first destination that still has it">download</a>
+            {{end}}
           </td>
         </tr>
         <tr class="detail-row">
