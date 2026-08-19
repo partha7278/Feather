@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/unifers/feather/internal/archive"
@@ -41,6 +40,9 @@ type Runner struct {
 	// it is read under the mutex rather than captured at construction.
 	notifyMu sync.RWMutex
 	notify   notify.Notifier
+
+	// sourceFor overrides how the collection is resolved. Only tests set it.
+	sourceFor func(context.Context, *config.JobConfig) (mongox.Source, error)
 }
 
 // SetNotifier swaps the notification sink. Called at startup and whenever the
@@ -288,11 +290,7 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		return outcome, err
 	}
 
-	client, err := r.mongo.Get(ctx, job.Source.MongoSource)
-	if err != nil {
-		return outcome, err
-	}
-	coll, err := client.Collection(job.Source.Database, job.Source.Collection, job.Source.ReadPreference)
+	source, err := r.source(ctx, job)
 	if err != nil {
 		return outcome, err
 	}
@@ -301,7 +299,7 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 	// run touches — the count, the cursor, and every delete — uses the fenced
 	// filter, so a document written while the run is working belongs to the
 	// next run rather than being swept up by this one.
-	maxID, found, err := mongox.MaxID(ctx, coll, filter)
+	maxID, found, err := source.MaxID(ctx, filter)
 	if err != nil {
 		return outcome, err
 	}
@@ -311,7 +309,7 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 	}
 	filter = mongox.FenceAtID(filter, maxID)
 
-	matching, err := mongox.Count(ctx, coll, filter)
+	matching, err := source.Count(ctx, filter)
 	if err != nil {
 		return outcome, fmt.Errorf("counting matching documents: %w", err)
 	}
@@ -328,7 +326,7 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		log.Warn("could not record the matched count", "error", err)
 	}
 
-	cursor, err := mongox.OpenCursor(ctx, coll, filter, projection, job.Batch.FetchSize, job.Source.TimestampField)
+	cursor, err := source.OpenCursor(ctx, filter, projection, job.Batch.FetchSize, job.Source.TimestampField)
 	if err != nil {
 		return outcome, err
 	}
@@ -351,7 +349,7 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		}
 
 		seq++
-		err = r.shipBatch(ctx, log, job, run, coll, filter, targets, batch, seq)
+		err = r.shipBatch(ctx, log, job, run, source, filter, targets, batch, seq)
 		discardErr := batch.spool.Discard()
 		if err != nil {
 			return outcome, err
@@ -384,7 +382,7 @@ type batch struct {
 
 // fillBatch reads documents into a fresh spool file until a size or count limit
 // is reached. The returned bool reports whether the cursor has more to give.
-func (r *Runner) fillBatch(ctx context.Context, cursor *mongox.Cursor, job *config.JobConfig, spoolDir string, run *store.Run) (*batch, bool, error) {
+func (r *Runner) fillBatch(ctx context.Context, cursor mongox.Stream, job *config.JobConfig, spoolDir string, run *store.Run) (*batch, bool, error) {
 	spool, err := archive.NewSpool(spoolDir, job.Name, job.Compression)
 	if err != nil {
 		return nil, false, err
@@ -434,7 +432,7 @@ func (r *Runner) fillBatch(ctx context.Context, cursor *mongox.Cursor, job *conf
 // shipBatch uploads one spooled file everywhere it belongs, verifies each copy,
 // and deletes the source documents once all copies are confirmed.
 func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.JobConfig, run *store.Run,
-	coll *mongo.Collection, filter bson.D, targets []dest.Destination, b *batch, seq int) error {
+	source mongox.Source, filter bson.D, targets []dest.Destination, b *batch, seq int) error {
 
 	baseKey := config.RenderKey(job.Output.KeyTemplate, config.KeyVars{
 		Database:   job.Source.Database,
@@ -508,7 +506,7 @@ func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.Jo
 	}
 
 	// Every copy is stored and verified; the source documents may now go.
-	deleted, err := mongox.DeleteByIDs(ctx, log, coll, filter, b.spool.IDs(), job.Retention.DeleteBatchSize)
+	deleted, err := source.DeleteByIDs(ctx, log, filter, b.spool.IDs(), job.Retention.DeleteBatchSize)
 
 	// Counted before the error is checked, and recorded before it is returned.
 	// A failure partway through returns the number of chunks that did succeed,
@@ -670,4 +668,24 @@ func compressionRatio(result *archive.Result) string {
 		return "n/a"
 	}
 	return fmt.Sprintf("%.1fx", float64(result.BytesRaw)/float64(result.BytesCompressed))
+}
+
+// source resolves the collection a job reads from.
+//
+// Split out so a test can supply its own: the runner otherwise reaches a real
+// *mongo.Collection through the pool, and the property most worth testing —
+// that a failed upload deletes nothing — needs neither a database nor a bucket.
+func (r *Runner) source(ctx context.Context, job *config.JobConfig) (mongox.Source, error) {
+	if r.sourceFor != nil {
+		return r.sourceFor(ctx, job)
+	}
+	client, err := r.mongo.Get(ctx, job.Source.MongoSource)
+	if err != nil {
+		return nil, err
+	}
+	coll, err := client.Collection(job.Source.Database, job.Source.Collection, job.Source.ReadPreference)
+	if err != nil {
+		return nil, err
+	}
+	return mongox.NewSource(coll), nil
 }

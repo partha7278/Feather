@@ -30,6 +30,21 @@ func NewRegistry(ctx context.Context, destinations map[string]config.Destination
 	return registry, nil
 }
 
+// NewRegistryWith builds a registry over destinations that already exist.
+//
+// The normal path constructs real S3 and Drive clients from stored credentials,
+// which leaves no way to exercise the runner without a cloud account. This is
+// the seam: the safety property that nothing is deleted until every copy is
+// stored and verified is worth a test, and a test needs a destination it can
+// make fail on demand.
+func NewRegistryWith(destinations map[string]Destination) *Registry {
+	byAlias := make(map[string]Destination, len(destinations))
+	for alias, destination := range destinations {
+		byAlias[alias] = destination
+	}
+	return &Registry{byAlias: byAlias}
+}
+
 // Replace swaps the whole set of clients. Building every client first means a
 // single bad account leaves the previous, working set in place.
 func (r *Registry) Replace(ctx context.Context, destinations map[string]config.Destination) error {

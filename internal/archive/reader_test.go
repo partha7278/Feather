@@ -3,6 +3,7 @@ package archive
 import (
 	"bytes"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -192,4 +193,70 @@ func sampleDocuments(t *testing.T) []bson.Raw {
 		out = append(out, encoded)
 	}
 	return out
+}
+
+// The spool's contract is that a batch is bounded by disk, not by RAM. Holding
+// each document's _id as it arrived quietly broke that: a bson.RawValue's bytes
+// are a subslice of the whole document, and Go cannot free a backing array
+// while any subslice of it is reachable, so retaining the id retained the
+// document. At the default 256 MB batch across two concurrent jobs that is an
+// out-of-memory kill on the VPS this is meant to run on.
+//
+// This asserts the heap stays proportional to the ids rather than to the
+// documents they came from.
+func TestSpoolingLargeDocumentsDoesNotRetainThem(t *testing.T) {
+	const (
+		documents   = 4000
+		payloadSize = 8 << 10 // 8 KiB each: ~32 MB of documents in total
+	)
+
+	spool := newSpool(t, config.CodecGzip)
+	payload := strings.Repeat("x", payloadSize)
+
+	for range documents {
+		encoded, err := bson.Marshal(bson.D{
+			{Key: "_id", Value: bson.NewObjectID()},
+			{Key: "payload", Value: payload},
+		})
+		if err != nil {
+			t.Fatalf("marshalling: %v", err)
+		}
+		raw := bson.Raw(encoded)
+		id, err := raw.LookupErr("_id")
+		if err != nil {
+			t.Fatalf("looking up _id: %v", err)
+		}
+		if err := spool.Add(mongox.Document{Raw: raw, ID: id}); err != nil {
+			t.Fatalf("adding: %v", err)
+		}
+	}
+
+	if _, err := spool.Finish("large.ndjson.gz"); err != nil {
+		t.Fatalf("finishing: %v", err)
+	}
+
+	// The ids are still held — the delete path needs them — so the spool is
+	// kept alive across the measurement on purpose. What must not be held is
+	// the documents they were carved out of.
+	runtime.GC()
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	retained := stats.HeapAlloc
+	runtime.KeepAlive(spool)
+
+	const written = documents * payloadSize
+	// Generous: the ids themselves are ~12 bytes each, and the test binary and
+	// compressor buffers account for a few MB. Retaining the documents would
+	// put this above 32 MB, so the bound catches the regression without being
+	// brittle about allocator behaviour.
+	const bound = written / 4
+
+	if retained > bound {
+		t.Errorf("spooling %s of documents left %s on the heap (bound %s) — "+
+			"the _id values are pinning the documents they came from",
+			config.HumanBytes(written), config.HumanBytes(int64(retained)), config.HumanBytes(bound))
+	}
+	if got := len(spool.IDs()); got != documents {
+		t.Errorf("spool holds %d ids, want %d", got, documents)
+	}
 }
