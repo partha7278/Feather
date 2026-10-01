@@ -77,13 +77,15 @@
 
   <form method="post" action="/settings/backup">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label for="backupPath">Write to</label>
-    <input type="text" id="backupPath" name="path" placeholder="{{.Data.DataDir}}/feather-backup-….db"
-           aria-describedby="backupPathHint">
-    <p class="hint" id="backupPathHint">
-      A full path on the server. Left blank, feather names one with today's date beside the
-      database. An existing file is never overwritten.
-    </p>
+    <div class="field">
+      <label for="backupPath">Write to</label>
+      <input type="text" id="backupPath" name="path" placeholder="{{.Data.DataDir}}/feather-backup-….db"
+             aria-describedby="backupPathHint">
+      <p class="hint" id="backupPathHint">
+        A full path on the server. Left blank, feather names one with today's date beside the
+        database. An existing file is never overwritten.
+      </p>
+    </div>
     <button type="submit" class="btn">Write a backup</button>
   </form>
 

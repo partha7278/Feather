@@ -45,10 +45,14 @@
     </a>
 
     <div class="sidebar-foot">
-      <div class="break">{{.User.Email}}</div>
+      <span class="avatar" aria-hidden="true">{{slice .User.Email 0 1}}</span>
+      <div class="who">
+        <strong>Administrator</strong>
+        <span title="{{.User.Email}}">{{.User.Email}}</span>
+      </div>
       <form method="post" action="/logout">
         <input type="hidden" name="csrf" value="{{.CSRF}}">
-        <button class="btn small" type="submit">Sign out</button>
+        <button class="btn small ghost" type="submit" title="Sign out">Sign out</button>
       </form>
     </div>
   </nav>
