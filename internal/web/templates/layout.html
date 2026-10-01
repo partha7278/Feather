@@ -9,7 +9,7 @@
 {{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
 <title>{{.Title}} · feather</title>
 <link rel="stylesheet" href="/static/app.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🪶</text></svg>">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
 </head>
 <body>
 {{if .LoggedIn}}
@@ -73,7 +73,7 @@
 
 {{define "brand"}}
 <div class="brand">
-  {{template "icon-feather"}}
+  {{template "logo"}}
   <span>feather<small>MongoDB retention &amp; archival</small></span>
 </div>
 {{end}}
