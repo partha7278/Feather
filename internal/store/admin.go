@@ -27,8 +27,22 @@ const SessionTTL = 12 * time.Hour
 const MinPasswordLength = 12
 
 // bcryptCost is deliberately above the library default: logins are rare and a
-// stolen database should be expensive to attack.
-const bcryptCost = 12
+// stolen database should be expensive to attack. It is a variable only so
+// UseCheapPasswordHashingForTests can lower it.
+var bcryptCost = 12
+
+// UseCheapPasswordHashingForTests drops bcrypt to its minimum cost for the rest
+// of the process. Under the race detector a cost-12 hash takes seconds, and a
+// package whose every test signs in an administrator then outruns go test's
+// timeout. Only a TestMain may call it; nothing outside tests ever should.
+func UseCheapPasswordHashingForTests() {
+	bcryptCost = bcrypt.MinCost
+	hash, err := bcrypt.GenerateFromPassword([]byte("feather-dummy-password"), bcryptCost)
+	if err != nil {
+		panic(err)
+	}
+	dummyHash = hash
+}
 
 // ErrBadCredentials covers both an unknown email and a wrong password, so a
 // login form cannot be used to enumerate accounts.
@@ -97,7 +111,7 @@ func CheckPasswordStrength(password string) error {
 }
 
 // dummyHash is compared against when there is no real hash to check, so a
-// rejection takes as long as a genuine mismatch.
+// rejection takes as long as a genuine mismatch. Its cost must match bcryptCost.
 var dummyHash = []byte("$2a$12$oGCZQPPuY6cVMWk0lyKUJeaGvVeqGmZ.WnGvNPS7lIT/JqZQTgxOe")
 
 // maxPasswordBytes is bcrypt's limit; it ignores everything past it.

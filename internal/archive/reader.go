@@ -48,7 +48,11 @@ func Decompress(r io.Reader, codec string) (io.ReadCloser, error) {
 	case CodecNone:
 		return io.NopCloser(r), nil
 	case config.CodecZstd:
-		decoder, err := zstd.NewReader(r)
+		// One goroutine, so the decoder reads r only from inside Read. The
+		// concurrent decoder reads ahead in the background, which races with
+		// DocumentReader.Drain reading the same source and can interleave the
+		// bytes the digest sees.
+		decoder, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1))
 		if err != nil {
 			return nil, fmt.Errorf("opening the zstd stream: %w", err)
 		}
