@@ -488,7 +488,7 @@ func TestAuditFieldsWithControlCharactersStayOneVerbatimEvent(t *testing.T) {
 		Action:     AuditConfigSaved,
 		TargetKind: "config",
 		Target:     "orders\x00hidden",
-		Detail:     "line one\nline two ‮evil",
+		Detail:     "line one\nline two\u2028\u202eevil",
 	}
 	if err := st.RecordAudit(ctx, event); err != nil {
 		t.Fatal(err)

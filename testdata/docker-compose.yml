@@ -35,7 +35,10 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio:latest
+    # MinIO no longer publishes images (Docker Hub and Quay both dropped them).
+    # Chainguard builds the same server from source; the image also ships mc and
+    # a shell, so createbuckets reuses it.
+    image: cgr.dev/chainguard/minio:latest
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -50,15 +53,26 @@ services:
       retries: 20
 
   createbuckets:
-    image: minio/mc:latest
+    image: cgr.dev/chainguard/minio:latest
     depends_on:
       minio:
         condition: service_healthy
+    # Stays up after creating the buckets: `compose up --wait` fails on any
+    # exited container, even one that exited 0. The healthcheck turns green
+    # only once the buckets exist, so --wait also covers bucket creation.
     entrypoint: >
       /bin/sh -c "
+      set -e;
       mc alias set local http://minio:9000 featherkey feathersecret;
       mc mb -p local/feather-primary;
       mc mb -p local/feather-backup;
       mc mb -p local/feather-cold;
+      touch /tmp/ready;
       echo 'buckets ready';
+      exec sleep infinity;
       "
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

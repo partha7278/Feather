@@ -573,7 +573,10 @@ func replaceBatch(ctx context.Context, log *slog.Logger, into *mongo.Collection,
 
 	models := make([]mongo.WriteModel, 0, len(batch))
 	for _, item := range batch {
-		doc := item.(bson.Raw)
+		doc, ok := item.(bson.Raw)
+		if !ok {
+			return 0, 0, 0, fmt.Errorf("restore batch item is %T, not bson.Raw", item)
+		}
 		id, lookupErr := doc.LookupErr("_id")
 		if lookupErr != nil {
 			models = append(models, mongo.NewInsertOneModel().SetDocument(doc))

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -20,6 +21,25 @@ type RunHistory struct {
 // A run still going is left out: imported elsewhere it would sit as running
 // forever, since no process there will ever finish it.
 func (s *Store) FinishedRunHistory(ctx context.Context) ([]RunHistory, error) {
+	// Read in full and closed before the per-run queries below: SQLite would
+	// otherwise hold the read open across them.
+	out, err := s.finishedRuns(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range out {
+		artifacts, err := s.ArtifactsForRun(ctx, out[i].Run.ID)
+		if err != nil {
+			return nil, fmt.Errorf("reading the files of run %s: %w", out[i].Run.ID, err)
+		}
+		out[i].Artifacts = artifacts
+	}
+	return out, nil
+}
+
+// finishedRuns reads every finished run, oldest first, without its files.
+func (s *Store) finishedRuns(ctx context.Context) ([]RunHistory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, config_name, config_sha256, db_name, collection_name, filter_json,
 		       trigger, host, status, dry_run, started_at, finished_at,
@@ -31,6 +51,7 @@ func (s *Store) FinishedRunHistory(ctx context.Context) ([]RunHistory, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	var out []RunHistory
 	for rows.Next() {
@@ -45,7 +66,6 @@ func (s *Store) FinishedRunHistory(ctx context.Context) ([]RunHistory, error) {
 			&run.FilterJSON, &trigger, &run.Host, &status, &dryRun, &startedAt, &finishedAt,
 			&run.DocsMatched, &run.DocsScanned, &run.DocsArchived, &run.DocsDeleted,
 			&run.BytesRaw, &run.BytesCompressed, &run.BatchCount, &run.Error); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		run.ID, _ = uuid.Parse(id)
@@ -53,27 +73,13 @@ func (s *Store) FinishedRunHistory(ctx context.Context) ([]RunHistory, error) {
 		run.Status = RunStatus(status)
 		run.DryRun = dryRun != 0
 		if run.StartedAt, err = parseTime(startedAt); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		run.FinishedAt = scanTime(finishedAt)
 		out = append(out, RunHistory{Run: run})
 	}
-	// Closed before the per-run queries below: SQLite would otherwise hold the
-	// read open across them.
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-
-	for i := range out {
-		artifacts, err := s.ArtifactsForRun(ctx, out[i].Run.ID)
-		if err != nil {
-			return nil, fmt.Errorf("reading the files of run %s: %w", out[i].Run.ID, err)
-		}
-		out[i].Artifacts = artifacts
 	}
 	return out, nil
 }
@@ -102,7 +108,7 @@ func (s *Store) ImportRunHistory(ctx context.Context, h RunHistory) (bool, error
 	switch {
 	case err == nil:
 		return false, nil
-	case err != sql.ErrNoRows:
+	case !errors.Is(err, sql.ErrNoRows):
 		return false, err
 	}
 
