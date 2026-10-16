@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // tokenRe matches {{now}}, {{now-90d}}, {{now+12h}} — with or without spaces.
@@ -28,20 +29,10 @@ func ResolveTimeTokens(raw json.RawMessage, now time.Time) (json.RawMessage, err
 
 	var badToken error
 	resolved := tokenRe.ReplaceAllFunc(raw, func(match []byte) []byte {
-		groups := tokenRe.FindSubmatch(match)
-		sign, offset := string(groups[1]), string(groups[2])
-
-		instant := now.UTC()
-		if offset != "" {
-			d, err := ParseDuration(offset)
-			if err != nil {
-				badToken = fmt.Errorf("token %q: %w", match, err)
-				return match
-			}
-			if sign == "-" {
-				d = -d
-			}
-			instant = instant.Add(d)
+		instant, err := resolveToken(string(match), now)
+		if err != nil {
+			badToken = err
+			return match
 		}
 		return []byte(instant.Format(tokenTimeLayout))
 	})
@@ -151,12 +142,12 @@ var keyTokenRe = regexp.MustCompile(`\{[^}/]*\}`)
 func RenderKey(template string, vars KeyVars) string {
 	at := vars.At.UTC()
 	replacer := strings.NewReplacer(
-		"{db}", vars.Database,
-		"{collection}", vars.Collection,
-		"{config}", vars.Config,
-		"{runId}", vars.RunID,
+		"{db}", keySegment(vars.Database),
+		"{collection}", keySegment(vars.Collection),
+		"{config}", keySegment(vars.Config),
+		"{runId}", keySegment(vars.RunID),
 		"{seq}", fmt.Sprintf("%05d", vars.Seq),
-		"{ext}", vars.Extension,
+		"{ext}", keySegment(vars.Extension),
 		"{yyyy}", at.Format("2006"),
 		"{MM}", at.Format("01"),
 		"{dd}", at.Format("02"),
@@ -165,6 +156,25 @@ func RenderKey(template string, vars KeyVars) string {
 		"{ts}", at.Format("20060102T150405Z"),
 	)
 	return strings.TrimPrefix(replacer.Replace(template), "/")
+}
+
+// keySegment makes a substituted value safe to place inside a key. The
+// template validator refuses "..", "/" and "\\" in the template itself; a
+// value substituted into it — MongoDB allows all three in a collection name —
+// must not be a way around that, or a key could climb out of its prefix (and,
+// on Google Drive, out of its folder). Separators and control characters
+// become "_", and a value made only of dots has its dots replaced too.
+func keySegment(value string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, value)
+	if cleaned != "" && strings.Trim(cleaned, ".") == "" {
+		cleaned = strings.Repeat("_", len(cleaned))
+	}
+	return cleaned
 }
 
 // KeyVars are the substitutions available to an output.keyTemplate.

@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/unifers/feather/internal/source"
 )
 
 // ParseFilter turns a resolved Extended JSON filter into a BSON document.
@@ -38,13 +39,9 @@ func ParseProjection(raw json.RawMessage) (bson.D, error) {
 	return projection, nil
 }
 
-// Document is one archived record plus the pieces feather needs to catalogue
-// and later delete it.
-type Document struct {
-	Raw bson.Raw
-	ID  bson.RawValue
-	TS  *time.Time
-}
+// Document is one archived record. It is the engine-neutral type; the alias
+// keeps the MongoDB code reading as it always has.
+type Document = source.Document
 
 // Cursor streams matching documents in _id order. Sorting by _id gives a stable
 // traversal that is cheap on every collection (the index always exists) and
@@ -147,7 +144,7 @@ func (c *Cursor) Next(ctx context.Context) (Document, bool, error) {
 
 	id, err := raw.LookupErr("_id")
 	if err != nil {
-		return Document{}, false, fmt.Errorf("document has no _id — feather cannot safely delete it later")
+		return Document{}, false, fmt.Errorf("document has no _id — Feather cannot safely delete it later")
 	}
 
 	doc := Document{Raw: raw, ID: id}

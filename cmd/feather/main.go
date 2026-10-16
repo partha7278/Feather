@@ -35,17 +35,18 @@ import (
 	"github.com/unifers/feather/internal/config"
 	"github.com/unifers/feather/internal/logging"
 	"github.com/unifers/feather/internal/mongox"
+	"github.com/unifers/feather/internal/pgsrc"
 	"github.com/unifers/feather/internal/restore"
 	"github.com/unifers/feather/internal/secrets"
 	"github.com/unifers/feather/internal/store"
 	"github.com/unifers/feather/internal/web"
 )
 
-const usage = `feather — MongoDB retention, archival and deletion
+const usage = `Feather — MongoDB and PostgreSQL retention, archival and deletion
 
-Everything is configured in the web UI and stored in feather's own database:
-the administrator login, MongoDB accounts, S3, Oracle and Google Drive
-destinations, and the retention configs.
+Everything is configured in the web UI and stored in Feather's own database:
+the administrator login, MongoDB and PostgreSQL accounts, S3, Oracle and Google
+Drive destinations, and the retention configs.
 
 Usage:
   feather serve                  Run the control panel and the scheduler
@@ -56,8 +57,8 @@ Usage:
   feather verify <run|archive|config>
                                  Re-read stored archives and check they are intact
   feather restore <run|archive|config> [--into db.coll] [--dry-run]
-                                 Put archived documents back into MongoDB
-  feather backup <file>          Write a consistent snapshot of feather's database
+                                 Put archived documents or rows back where they came from
+  feather backup <file>          Write a consistent snapshot of Feather's database
   feather list                   Show configs, schedules and last run status
   feather export <file>          Write every account, config and setting to one bundle
   feather import-bundle <file>   Read a bundle written by "feather export" back in
@@ -79,7 +80,7 @@ Flags:
   --no-secrets       Export without credentials, so no passphrase is needed
   --overwrite        Let import-bundle replace accounts and configs already here
   --skip-settings    Leave this instance's name and concurrency cap alone
-  --into <db.coll>   Restore into this collection instead of the original
+  --into <db.coll>   Restore into this collection (or schema.table) instead of the original
   --from <alias>     Restore from this destination instead of the first readable one
 `
 
@@ -270,6 +271,7 @@ func runServe(ctx context.Context, env *config.Env, log *slog.Logger, secureCook
 	}
 
 	a.StartHousekeeping(ctx)
+	a.StartSelfBackup(ctx)
 	a.Scheduler.Start()
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -307,6 +309,7 @@ func runDaemon(ctx context.Context, env *config.Env, log *slog.Logger) error {
 	}
 
 	a.StartHousekeeping(ctx)
+	a.StartSelfBackup(ctx)
 	a.Scheduler.Start()
 	log.Info("feather daemon started", "version", buildinfo.Version(), "commit", buildinfo.Get().Commit,
 		"max_concurrent", a.MaxConcurrentJobs(ctx))
@@ -384,6 +387,20 @@ func runValidate(ctx context.Context, env *config.Env, log *slog.Logger) error {
 	}
 	log.Info("MongoDB accounts reachable", "count", len(sources))
 
+	pgSources, err := a.Store.ListPostgresSources(ctx)
+	if err != nil {
+		return err
+	}
+	for _, source := range pgSources {
+		if !source.Enabled {
+			continue
+		}
+		if err := pgsrc.Ping(ctx, source.Source()); err != nil {
+			return fmt.Errorf("PostgreSQL account %q: %s", source.Alias, config.RedactSecretsFromError(err))
+		}
+	}
+	log.Info("PostgreSQL accounts reachable", "count", len(pgSources))
+
 	jobs, err := a.Store.Jobs(ctx)
 	if err != nil {
 		return err
@@ -391,35 +408,20 @@ func runValidate(ctx context.Context, env *config.Env, log *slog.Logger) error {
 
 	now := time.Now()
 	writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(writer, "CONFIG\tCOLLECTION\tMATCHING\tDELETE\tDESTINATIONS\tSCHEDULE\tRESOLVED FILTER")
+	fmt.Fprintln(writer, "CONFIG\tSOURCE\tMATCHING\tDELETE\tDESTINATIONS\tSCHEDULE\tRESOLVED FILTER")
 
 	for _, job := range jobs {
-		resolved, err := config.ResolveTimeTokens(job.Source.Filter, now)
+		matching, resolved, err := a.CountMatching(ctx, job, now)
 		if err != nil {
-			return fmt.Errorf("config %s: %w", job.Name, err)
+			return fmt.Errorf("config %s: counting matching records: %w", job.Name, err)
 		}
-		filter, err := mongox.ParseFilter(resolved)
-		if err != nil {
-			return fmt.Errorf("config %s: %w", job.Name, err)
+		if !job.Source.IsPostgres() {
+			resolved = compactJSON([]byte(resolved))
 		}
-
-		client, err := a.Mongo.Get(ctx, job.Source.MongoSource)
-		if err != nil {
-			return fmt.Errorf("config %s: %w", job.Name, err)
-		}
-		coll, err := client.Collection(job.Source.Database, job.Source.Collection, job.Source.ReadPreference)
-		if err != nil {
-			return fmt.Errorf("config %s: %w", job.Name, err)
-		}
-		matching, err := mongox.Count(ctx, coll, filter)
-		if err != nil {
-			return fmt.Errorf("config %s: counting matching documents: %w", job.Name, err)
-		}
-
-		fmt.Fprintf(writer, "%s\t%s.%s\t%d\t%s\t%v\t%s\t%s\n",
-			job.Name, job.Source.Database, job.Source.Collection, matching,
+		fmt.Fprintf(writer, "%s\t%s %s.%s\t%d\t%s\t%v\t%s\t%s\n",
+			job.Name, job.Source.EngineName(), job.Source.Database, job.Source.Collection, matching,
 			yesNo(job.Retention.DeleteAfterArchive), job.Destinations,
-			scheduleSummary(job), compactJSON(resolved))
+			scheduleSummary(job), resolved)
 	}
 	if err := writer.Flush(); err != nil {
 		return err
@@ -628,8 +630,8 @@ func runExport(ctx context.Context, env *config.Env, log *slog.Logger, path, pas
 		return err
 	}
 
-	fmt.Printf("Wrote %s: %d MongoDB account(s), %d destination(s), %d retention config(s).\n",
-		path, len(exported.MongoSources), len(exported.Destinations), len(exported.Configs))
+	fmt.Printf("Wrote %s: %d MongoDB account(s), %d PostgreSQL account(s), %d destination(s), %d retention config(s).\n",
+		path, len(exported.MongoSources), len(exported.PostgresSources), len(exported.Destinations), len(exported.Configs))
 	if exported.HasSecrets() {
 		fmt.Println("Credentials in it are sealed with the passphrase you typed. Without that passphrase the file cannot be imported.")
 	} else {
@@ -866,7 +868,8 @@ func runVerify(ctx context.Context, env *config.Env, log *slog.Logger, target st
 	return nil
 }
 
-// runRestore puts archived documents back into MongoDB.
+// runRestore puts archived documents back into MongoDB, or archived rows back
+// into PostgreSQL, according to where each archive came from.
 func runRestore(ctx context.Context, env *config.Env, log *slog.Logger, target string, opts restoreOptions) error {
 	a, err := app.Open(ctx, env, log)
 	if err != nil {
@@ -882,9 +885,42 @@ func runRestore(ctx context.Context, env *config.Env, log *slog.Logger, target s
 		return fmt.Errorf("no archives found for %s", label)
 	}
 
-	into, description, err := resolveRestoreTarget(ctx, a, artifacts, opts)
-	if err != nil {
-		return err
+	// Each archive goes back the way its engine wrote it. A mixed set would
+	// need two targets, so it is refused rather than half-restored.
+	postgres := artifacts[0].IsPostgres()
+	for _, item := range artifacts {
+		if item.IsPostgres() != postgres {
+			return errors.New("these archives came from both MongoDB and PostgreSQL — restore them one archive or one run at a time")
+		}
+	}
+
+	var (
+		restoreOne  func(store.ArtifactWithCopies) (restore.Result, error)
+		description string
+	)
+	options := restore.Options{DryRun: opts.dryRun, PreferAlias: opts.from}
+	if postgres {
+		var writer *pgsrc.Writer
+		writer, description, err = resolveTableRestoreTarget(ctx, a, artifacts, opts)
+		if err != nil {
+			return err
+		}
+		restoreOne = func(item store.ArtifactWithCopies) (restore.Result, error) {
+			var into restore.TableWriter
+			if writer != nil {
+				into = writer
+			}
+			return restore.TableArtifact(ctx, log, a.Registry, into, item.Artifact, item.Copies, options)
+		}
+	} else {
+		var into *mongo.Collection
+		into, description, err = resolveRestoreTarget(ctx, a, artifacts, opts)
+		if err != nil {
+			return err
+		}
+		restoreOne = func(item store.ArtifactWithCopies) (restore.Result, error) {
+			return restore.Artifact(ctx, log, a.Registry, into, item.Artifact, item.Copies, options)
+		}
 	}
 
 	verb := "Restoring"
@@ -895,10 +931,7 @@ func runRestore(ctx context.Context, env *config.Env, log *slog.Logger, target s
 
 	var totalRead, totalInserted, totalPresent int64
 	for _, item := range artifacts {
-		result, err := restore.Artifact(ctx, log, a.Registry, into, item.Artifact, item.Copies, restore.Options{
-			DryRun:      opts.dryRun,
-			PreferAlias: opts.from,
-		})
+		result, err := restoreOne(item)
 		totalRead += result.DocumentsRead
 		totalInserted += result.Inserted
 		totalPresent += result.AlreadyPresent
@@ -963,7 +996,7 @@ func resolveRestoreTarget(ctx context.Context, a *app.App, artifacts []store.Art
 		record, err := a.Store.JobByName(ctx, artifacts[0].ConfigName)
 		if err != nil {
 			return nil, "", fmt.Errorf(
-				"config %q is gone, so feather cannot tell which MongoDB account to restore through — recreate it, or restore by hand with mongoimport: %w",
+				"config %q is gone, so Feather cannot tell which MongoDB account to restore through — recreate it, or restore by hand with mongoimport: %w",
 				artifacts[0].ConfigName, err)
 		}
 		alias = record.Config.Source.MongoSource
@@ -978,6 +1011,54 @@ func resolveRestoreTarget(ctx context.Context, a *app.App, artifacts []store.Art
 		return nil, "", err
 	}
 	return target, database + "." + collection + " on " + alias, nil
+}
+
+// resolveTableRestoreTarget is resolveRestoreTarget for PostgreSQL archives:
+// the table they came from, or --into schema.table, through the PostgreSQL
+// account the config reads.
+func resolveTableRestoreTarget(ctx context.Context, a *app.App, artifacts []store.ArtifactWithCopies, opts restoreOptions) (*pgsrc.Writer, string, error) {
+	if opts.dryRun {
+		return nil, "nowhere", nil
+	}
+
+	schema, table := artifacts[0].Database, artifacts[0].Collection
+	if opts.into != "" {
+		parts := strings.SplitN(opts.into, ".", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, "", fmt.Errorf("--into wants schema.table, not %q", opts.into)
+		}
+		schema, table = parts[0], parts[1]
+	} else {
+		for _, item := range artifacts {
+			if item.Database != schema || item.Collection != table {
+				return nil, "", fmt.Errorf(
+					"these archives came from more than one table (%s.%s and %s.%s) — name one with --into schema.table",
+					schema, table, item.Database, item.Collection)
+			}
+		}
+	}
+
+	record, err := a.Store.JobByName(ctx, artifacts[0].ConfigName)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"config %q is gone, so Feather cannot tell which PostgreSQL account to restore through — recreate it: %w",
+			artifacts[0].ConfigName, err)
+	}
+	if !record.Config.Source.IsPostgres() {
+		return nil, "", fmt.Errorf("config %q now reads from MongoDB, so it no longer names the PostgreSQL account these archives came from",
+			artifacts[0].ConfigName)
+	}
+	alias := record.Config.Source.PostgresSource
+
+	db, err := a.Postgres.Get(ctx, alias)
+	if err != nil {
+		return nil, "", err
+	}
+	writer, err := pgsrc.NewWriter(ctx, db, schema, table)
+	if err != nil {
+		return nil, "", err
+	}
+	return writer, schema + "." + table + " on " + alias, nil
 }
 
 // resolveArtifacts turns what the operator typed — a run id, an artifact id, or

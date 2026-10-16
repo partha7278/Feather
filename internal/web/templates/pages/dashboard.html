@@ -1,172 +1,217 @@
 {{define "content"}}
 {{$t := .Data.Totals}}
+{{$steps := .Data.NeedsSetupSteps}}
+{{$setup := or $steps.mongo $steps.destinations $steps.configs}}
+{{/* A fresh install: nothing to report yet, so the page is just the stepper. */}}
+{{$fresh := and $setup (not .Data.Recent)}}
+<div class="overview">
 <div class="page-head">
   <div>
     <h1>Overview</h1>
-    <p>What has been archived, what is scheduled next, and which configs are allowed to delete from MongoDB.</p>
+    <p>What has been archived, what runs next, and which configs may delete from their source.</p>
   </div>
+  {{if not $setup}}
   <div class="page-actions">
-    <a class="btn" href="/backups">Browse backups</a>
     <a class="btn primary" href="/configs/new">{{template "icon-plus"}} New config</a>
   </div>
+  {{end}}
 </div>
 
-{{if or .Data.NeedsSetupSteps.mongo .Data.NeedsSetupSteps.destinations .Data.NeedsSetupSteps.configs}}
-<div class="card">
-  <h2>Finish setting up</h2>
-  <p class="hint">Three things stand between here and the first archive.</p>
-  <div class="steps">
-    <div class="step {{if not .Data.NeedsSetupSteps.mongo}}done{{end}}">
-      <span class="num">1</span>
-      <div>
-        <strong>Add a MongoDB account</strong>
-        <p>The cluster feather reads from. You can add as many as you need — each config picks one.</p>
-        {{if .Data.NeedsSetupSteps.mongo}}<a class="btn small" href="/mongo/new" style="margin-top:8px">Add account</a>{{end}}
-      </div>
+{{if $setup}}
+{{$done := 0}}
+{{if not $steps.mongo}}{{$done = add $done 1}}{{end}}
+{{if not $steps.destinations}}{{$done = add $done 1}}{{end}}
+{{if not $steps.configs}}{{$done = add $done 1}}{{end}}
+<section class="card setup-card" aria-labelledby="setup-title">
+  <div class="card-head">
+    <div>
+      <h2 id="setup-title">Finish setting up</h2>
+      <p class="hint">Three things stand between here and the first archive.</p>
     </div>
-    <div class="step {{if not .Data.NeedsSetupSteps.destinations}}done{{end}}">
-      <span class="num">2</span>
+    <span class="setup-count">{{$done}} of 3 done</span>
+  </div>
+  <ol class="steps">
+    <li class="step {{if not $steps.mongo}}done{{end}}">
+      <span class="num">{{if not $steps.mongo}}{{template "icon-check"}}<span class="visually-hidden">(done)</span>{{else}}1{{end}}</span>
+      <div>
+        <strong>Add a database to archive from</strong>
+        <p>A MongoDB cluster or a PostgreSQL database. Each config picks one. Add it, then press Test.</p>
+        {{if $steps.mongo}}<a class="btn small primary" href="/mongo/new">Add MongoDB account</a> <a class="btn small" href="/postgres/new">Add PostgreSQL account</a>{{end}}
+      </div>
+    </li>
+    <li class="step {{if not $steps.destinations}}done{{end}}">
+      <span class="num">{{if not $steps.destinations}}{{template "icon-check"}}<span class="visually-hidden">(done)</span>{{else}}2{{end}}</span>
       <div>
         <strong>Add a backup destination</strong>
-        <p>An S3 or Oracle Cloud bucket. A config can write to several at once, and every one gets a full copy.</p>
-        {{if .Data.NeedsSetupSteps.destinations}}<a class="btn small" href="/destinations/new" style="margin-top:8px">Add destination</a>{{end}}
+        <p>An S3, Oracle Cloud or Google Drive location. Every one gets a full copy. Add it, then press Test.</p>
+        {{if $steps.destinations}}<a class="btn small{{if not $steps.mongo}} primary{{end}}" href="/destinations/new">Add destination</a>{{end}}
       </div>
-    </div>
-    <div class="step {{if not .Data.NeedsSetupSteps.configs}}done{{end}}">
-      <span class="num">3</span>
+    </li>
+    <li class="step {{if not $steps.configs}}done{{end}}">
+      <span class="num">{{if not $steps.configs}}{{template "icon-check"}}<span class="visually-hidden">(done)</span>{{else}}3{{end}}</span>
       <div>
         <strong>Create a retention config</strong>
-        <p>What to archive, where to put it, when to run, and whether the source documents are deleted afterwards.</p>
-        {{if and (not .Data.NeedsSetupSteps.destinations) (not .Data.NeedsSetupSteps.mongo) .Data.NeedsSetupSteps.configs}}<a class="btn small" href="/configs/new" style="margin-top:8px">Create config</a>{{end}}
+        <p>What to archive, when, and whether the source is deleted afterwards.</p>
+        {{if and (not $steps.destinations) (not $steps.mongo) $steps.configs}}<a class="btn small primary" href="/configs/new">Create config</a>{{end}}
       </div>
+    </li>
+  </ol>
+</section>
+{{end}}
+
+{{/* Needs attention: the latest run of each config, when that run failed or
+     only partly finished. An older failure a later run has since fixed is
+     not repeated here. */}}
+{{$attention := false}}
+{{range $i, $run := .Data.Recent}}{{if or (eq (print $run.Status) "failed") (eq (print $run.Status) "partial")}}{{$attention = true}}{{end}}{{end}}
+{{if $attention}}
+<section class="attention" aria-labelledby="attention-title">
+  <h2 id="attention-title" class="attention-title">Needs attention</h2>
+  {{range $i, $run := .Data.Recent}}
+    {{$earlier := false}}
+    {{range $j, $other := $.Data.Recent}}{{if and (lt $j $i) (eq $other.ConfigName $run.ConfigName)}}{{$earlier = true}}{{end}}{{end}}
+    {{if and (not $earlier) (or (eq (print $run.Status) "failed") (eq (print $run.Status) "partial"))}}
+    <div class="notice callout danger">
+      <strong>{{$run.ConfigName}} {{$run.Status}}</strong>
+      <span class="dim-time">{{since $run.StartedAt}}</span>{{if $run.Error}} — <span class="attention-error">{{truncate 200 $run.Error}}</span>{{end}}
+      {{if contains $.Data.Deleting $run.ConfigName}}<span class="hint">Nothing was deleted for documents whose copies didn't all verify; the next run retries them.</span>{{end}}
+      <a class="attention-link" href="/runs/{{$run.RunID}}">View run<span class="visually-hidden"> for {{$run.ConfigName}}</span> <span aria-hidden="true">→</span></a>
     </div>
-  </div>
+    {{end}}
+  {{end}}
+</section>
+{{end}}
+
+{{if .Data.Deleting}}
+<div class="notice callout">
+  <strong>Deletion is enabled on {{len .Data.Deleting}} {{if eq (len .Data.Deleting) 1}}config{{else}}configs{{end}}</strong>
+  {{range $i, $name := .Data.Deleting}}{{if $i}}, {{end}}<a href="/configs">{{$name}}</a>{{end}} —
+  records matching those filters are removed from their source once every copy is stored and verified.
 </div>
 {{end}}
 
-<div class="grid stats" style="margin-bottom:18px">
+{{if not $fresh}}
+{{if .Data.Recent}}
+<div class="grid stats">
   <div class="stat">
     <div class="label">Archived documents</div>
-    <div class="value">{{number $t.DocsArchived}}</div>
+    <div class="value{{if eq $t.DocsArchived 0}} zero{{end}}">{{number $t.DocsArchived}}</div>
     <div class="sub">across {{number $t.Artifacts}} files</div>
   </div>
   <div class="stat">
     <div class="label">Stored</div>
-    <div class="value">{{bytes $t.BytesStored}}</div>
+    <div class="value{{if eq $t.BytesStored 0}} zero{{end}}">{{bytes $t.BytesStored}}</div>
     <div class="sub">compressed, per copy</div>
   </div>
-  <div class="stat">
-    <div class="label">Deleted from MongoDB</div>
-    <div class="value">{{number $t.DocsDeleted}}</div>
+  <div class="stat{{if gt $t.DocsDeleted 0}} warn{{end}}">
+    <div class="label">Deleted from source</div>
+    <div class="value{{if eq $t.DocsDeleted 0}} zero{{end}}">{{number $t.DocsDeleted}}</div>
     <div class="sub">after verified upload</div>
   </div>
   <div class="stat">
     <div class="label">Runs in 24h</div>
-    <div class="value">{{number $t.RunsLast24h}}</div>
-    <div class="sub">{{if gt $t.FailedRuns 0}}{{number $t.FailedRuns}} failed or partial all-time{{else}}no failures recorded{{end}}</div>
+    <div class="value{{if eq $t.RunsLast24h 0}} zero{{end}}">{{number $t.RunsLast24h}}</div>
+    <div class="sub">{{if gt $t.FailedRuns 0}}{{number $t.FailedRuns}} failed or partial since install{{else}}no failures recorded{{end}}</div>
   </div>
 </div>
 
-{{if .Data.Deleting}}
-<div class="notice">
-  <strong>Deletion is enabled on {{len .Data.Deleting}} config(s)</strong>
-  {{range $i, $name := .Data.Deleting}}{{if $i}}, {{end}}<a href="/configs">{{$name}}</a>{{end}} —
-  documents matching those filters are removed from MongoDB once every copy is stored and verified.
-</div>
 {{end}}
 
-<div class="grid two">
-  <div class="card">
-    <div class="card-head">
-      <div><h2>Schedule</h2><p class="hint">Next run for each enabled config.</p></div>
-      <a class="btn small" href="/configs">All configs</a>
-    </div>
-    {{if .Data.Jobs}}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Config</th><th>Collection</th><th>Next run</th><th>Deletes</th></tr></thead>
-        <tbody>
-        {{range .Data.Jobs}}
-          {{$job := .Config}}
-          <tr>
-            <td>
-              <a href="/configs/{{.ID}}">{{$job.Name}}</a>
-              {{if not $job.IsEnabled}}<span class="badge muted">paused</span>{{end}}
-              {{if index $.Data.Running $job.Name}}<span class="badge busy">running</span>{{end}}
-            </td>
-            <td class="small dim">{{$job.Source.Database}}.{{$job.Source.Collection}}</td>
-            <td class="small">
-              {{$next := index $.Data.NextRuns $job.Name}}
-              {{if $next.IsZero}}<span class="dim">—</span>{{else}}{{datetime $next}}{{end}}
-            </td>
-            <td>
-              {{if $job.Retention.DeleteAfterArchive}}<span class="badge warn">yes</span>
-              {{else}}<span class="badge muted">no</span>{{end}}
-            </td>
-          </tr>
-        {{end}}
-        </tbody>
-      </table>
-    </div>
-    {{else}}
-    <p class="dim small">No retention configs yet.</p>
-    {{end}}
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <div><h2>Storage by destination</h2><p class="hint">What each account is holding.</p></div>
-      <a class="btn small" href="/destinations">Manage</a>
-    </div>
-    {{if .Data.Usage}}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Destination</th><th>Bucket</th><th class="num">Objects</th><th class="num">Size</th><th>Last write</th></tr></thead>
-        <tbody>
-        {{range .Data.Usage}}
-          <tr>
-            <td>{{.Alias}} {{if .Failed}}<span class="badge bad">{{.Failed}} failed</span>{{end}}</td>
-            <td class="small mono">{{.Bucket}}</td>
-            <td class="num">{{number .Objects}}</td>
-            <td class="num">{{bytes .Bytes}}</td>
-            <td class="small dim nowrap">{{since .LastWrite}}</td>
-          </tr>
-        {{end}}
-        </tbody>
-      </table>
-    </div>
-    {{else}}
-    <p class="dim small">Nothing has been uploaded yet.</p>
-    {{end}}
-  </div>
-</div>
-
-<div class="card">
+{{if .Data.Recent}}
+<section class="card flush" aria-labelledby="recent-title">
   <div class="card-head">
-    <div><h2>Recent runs</h2></div>
-    <a class="btn small" href="/runs">All runs</a>
+    <div><h2 id="recent-title">Recent runs</h2><p class="hint">The latest runs across every config.</p></div>
+    <a class="btn small ghost" href="/runs">All runs</a>
   </div>
-  {{if .Data.Recent}}
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>Config</th><th>Status</th><th>Started</th><th class="num">Archived</th><th class="num">Deleted</th><th class="num">Stored</th><th></th></tr></thead>
+  <div class="table-wrap" tabindex="0" role="region" aria-labelledby="recent-title">
+    <table class="runs-table">
+      <thead><tr><th scope="col">Config</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col" class="num">Archived</th><th scope="col" class="num">Deleted</th><th scope="col" class="num">Stored</th></tr></thead>
       <tbody>
       {{range .Data.Recent}}
         <tr>
-          <td>{{.ConfigName}}{{if .DryRun}} <span class="badge muted">dry run</span>{{end}}</td>
-          <td><span class="badge {{statusTone .Status}}">{{.Status}}</span></td>
-          <td class="small nowrap">{{datetime .StartedAt}}</td>
-          <td class="num">{{number .DocsArchived}}</td>
-          <td class="num">{{number .DocsDeleted}}</td>
-          <td class="num">{{bytes .BytesStored}}</td>
-          <td class="actions"><a class="btn small" href="/runs/{{.RunID}}">Details</a></td>
+          <td class="first"><a class="row-link" href="/runs/{{.RunID}}">{{.ConfigName}}<span class="visually-hidden">, run started {{datetime .StartedAt}}</span></a>{{if and .DryRun (ne (print .Status) "dry_run")}} <span class="badge muted">dry run</span>{{end}}{{if .Error}}<div class="row-error" title="{{.Error}}">{{truncate 400 .Error}}</div>{{end}}</td>
+          <td>{{if eq (print .Status) "dry_run"}}<span class="badge muted">dry run</span>{{else}}<span class="badge {{statusTone .Status}}">{{.Status}}</span>{{end}}</td>
+          <td class="nowrap dim"><time datetime="{{.StartedAt.UTC.Format "2006-01-02T15:04:05Z"}}" title="{{datetime .StartedAt}}">{{since .StartedAt}}</time></td>
+          <td class="num">{{if eq .DocsArchived 0}}<span class="nil" aria-hidden="true">—</span><span class="visually-hidden">0</span>{{else}}{{number .DocsArchived}}{{end}}</td>
+          <td class="num">{{if eq .DocsDeleted 0}}<span class="nil" aria-hidden="true">—</span><span class="visually-hidden">0</span>{{else}}{{number .DocsDeleted}}{{end}}</td>
+          <td class="num">{{if eq .BytesStored 0}}<span class="nil" aria-hidden="true">—</span><span class="visually-hidden">0 B</span>{{else}}{{bytes .BytesStored}}{{end}}</td>
         </tr>
       {{end}}
       </tbody>
     </table>
   </div>
-  {{else}}
-  <p class="dim small">No runs yet.</p>
-  {{end}}
+</section>
+{{else}}
+{{/* Set up, never run: the one thing left is a safe first run. */}}
+<section class="card first-run" aria-labelledby="first-run-title">
+  <span class="empty-icon">{{template "icon-play"}}</span>
+  <p id="first-run-title"><strong>Last step: try it safely.</strong> Open your config and press Dry run — it reads and compresses everything but uploads and deletes nothing. Then check the counts on the run page.</p>
+  <a class="btn" href="/configs">Go to retention configs</a>
+</section>
+{{end}}
+
+<div class="grid two">
+  <section class="card flush" aria-labelledby="schedule-title">
+    <div class="card-head">
+      <div><h2 id="schedule-title">Schedule</h2><p class="hint">Next run for each enabled config.</p></div>
+      <a class="btn small ghost" href="/configs">All configs</a>
+    </div>
+    {{if .Data.Jobs}}
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="schedule-title">
+      <table>
+        <thead><tr><th scope="col">Config</th><th scope="col" class="col-opt">Collection</th><th scope="col">Next run <span class="th-note">(server time)</span></th></tr></thead>
+        <tbody>
+        {{range .Data.Jobs}}
+          {{$job := .Config}}
+          <tr>
+            <td class="first">
+              <a href="/configs/{{.ID}}">{{$job.Name}}</a>
+              {{if $job.Retention.DeleteAfterArchive}}<span class="badge warn">deletes</span>{{end}}
+              {{if not $job.IsEnabled}}<span class="badge muted">paused</span>{{end}}
+              {{if index $.Data.Running $job.Name}}<span class="badge busy">running</span>{{end}}
+            </td>
+            <td class="dim col-opt">{{$job.Source.Database}}.{{$job.Source.Collection}}</td>
+            <td class="nowrap">
+              {{$next := index $.Data.NextRuns $job.Name}}
+              {{if $next.IsZero}}<span class="nil">—</span>{{else}}<time datetime="{{$next.UTC.Format "2006-01-02T15:04:05Z"}}" title="{{datetime $next}}">{{datetime $next}}</time>{{end}}
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="empty-line">No retention configs yet. <a href="/configs/new">Create one</a> to start archiving.</p>
+    {{end}}
+  </section>
+
+  <section class="card flush" aria-labelledby="storage-title">
+    <div class="card-head">
+      <div><h2 id="storage-title">Storage by destination</h2><p class="hint">What each destination is holding.</p></div>
+      <a class="btn small ghost" href="/destinations">Manage</a>
+    </div>
+    {{if .Data.Usage}}
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="storage-title">
+      <table>
+        <thead><tr><th scope="col">Destination</th><th scope="col" class="col-opt">Bucket</th><th scope="col" class="num">Objects</th><th scope="col" class="num">Size</th><th scope="col" class="num">Last write</th></tr></thead>
+        <tbody>
+        {{range .Data.Usage}}
+          <tr>
+            <td class="first">{{.Alias}}{{if .Failed}} <span class="badge bad">{{.Failed}} failed</span>{{end}}</td>
+            <td class="mono dim col-opt">{{.Bucket}}</td>
+            <td class="num">{{number .Objects}}</td>
+            <td class="num">{{bytes .Bytes}}</td>
+            <td class="num dim">{{since .LastWrite}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="empty-line">Nothing has been uploaded yet.</p>
+    {{end}}
+  </section>
+</div>
+{{end}}
 </div>
 {{end}}

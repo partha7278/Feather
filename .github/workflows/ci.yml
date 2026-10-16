@@ -76,7 +76,7 @@ jobs:
   # restore. This is the job that proves the durability guarantee, so it gates
   # the build rather than running as an optional extra.
   integration:
-    name: end-to-end (mongo + minio)
+    name: end-to-end (mongo + postgres + minio)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,10 +95,11 @@ jobs:
         env:
           FEATHER_TEST_MONGO_URI: mongodb://127.0.0.1:27018
           FEATHER_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          FEATHER_TEST_POSTGRES_DSN: postgres://feather:feather@127.0.0.1:5433/feather?sslmode=disable
           # CI starts the rig on purpose, so a rig that is not up is a failure,
           # not a reason to pass quietly.
           FEATHER_TEST_REQUIRE_RIG: "1"
-        run: go test -race -count=1 -tags=integration -timeout 20m ./internal/e2e/...
+        run: go test -race -count=1 -tags=integration -timeout 20m ./internal/e2e/... ./internal/pgsrc/... ./internal/runner/...
 
       - name: rig logs on failure
         if: failure()
@@ -155,17 +156,48 @@ jobs:
           cache: true
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  # Builds linux/amd64 and linux/arm64 on every run; pushes to Docker Hub only
+  # for pushes to main or a v* tag, and only once the checks and tests pass.
+  # Needs repo variable DOCKERHUB_USERNAME and secret DOCKERHUB_TOKEN.
   docker:
-    name: docker build
+    name: docker build and push
     runs-on: ubuntu-latest
+    needs: [check, test, integration]
+    env:
+      PUSH: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ vars.DOCKERHUB_USERNAME || 'unifers' }}/feather
+          # v1.2.3 -> 1.2.3, 1.2, 1 and latest; main -> main; every push -> sha-<short>.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=branch
+            type=sha
+
+      - uses: docker/login-action@v3
+        if: env.PUSH == 'true'
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: false
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ github.sha }}
+            DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}

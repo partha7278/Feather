@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/gzip"
@@ -101,10 +102,20 @@ func NewSpool(dir, namePrefix string, comp config.Compression) (*Spool, error) {
 // Add encodes one document as a canonical Extended JSON line. Canonical form is
 // deliberate: it preserves ObjectId, Date, Decimal128 and int32-vs-int64, so the
 // archive restores through mongoimport as the same types it started as.
+//
+// A document that arrives already encoded (doc.Line, as PostgreSQL rows do) is
+// written as given.
 func (s *Spool) Add(doc mongox.Document) error {
-	line, err := bson.MarshalExtJSON(doc.Raw, true, false)
-	if err != nil {
-		return fmt.Errorf("encoding document as Extended JSON: %w", err)
+	var line []byte
+	if doc.Line != nil {
+		line = make([]byte, 0, len(doc.Line)+1)
+		line = append(line, doc.Line...)
+	} else {
+		encoded, err := bson.MarshalExtJSON(doc.Raw, true, false)
+		if err != nil {
+			return fmt.Errorf("encoding document as Extended JSON: %w", err)
+		}
+		line = encoded
 	}
 	line = append(line, '\n')
 
@@ -221,19 +232,36 @@ func (s *Spool) abort() {
 // be redone from Mongo, which still holds the data.
 func CleanSpoolDir(dir string) (int, error) {
 	// Spool files live one level down, in a directory per config, so both
-	// levels are swept.
-	patterns := []string{
-		filepath.Join(dir, "*.tmp"),
-		filepath.Join(dir, "*", "*.tmp"),
-	}
+	// levels are swept. The sweep is done by hand rather than with a glob so
+	// that it never descends through a symlinked directory, and a *.tmp that
+	// is itself a symlink is removed as a link: what either points at belongs
+	// to somebody else.
+	return cleanSpoolLevel(dir, true)
+}
 
-	removed := 0
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			return removed, err
+func cleanSpoolLevel(dir string, descend bool) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
 		}
-		for _, path := range matches {
+		return 0, err
+	}
+	removed := 0
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		// DirEntry.Type comes from lstat, so a symlink is never reported as a
+		// directory here.
+		if entry.IsDir() {
+			if descend {
+				// An unreadable config directory is skipped, as the glob
+				// this replaced skipped it.
+				n, _ := cleanSpoolLevel(path, false)
+				removed += n
+			}
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".tmp") {
 			if err := os.Remove(path); err == nil {
 				removed++
 			}

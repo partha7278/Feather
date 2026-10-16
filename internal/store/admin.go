@@ -90,10 +90,30 @@ func CheckPasswordStrength(password string) error {
 	}
 	// bcrypt silently ignores anything past 72 bytes, which would make a long
 	// passphrase weaker than it looks.
-	if len(password) > 72 {
+	if len(password) > maxPasswordBytes {
 		return errors.New("the password must be at most 72 bytes")
 	}
 	return nil
+}
+
+// dummyHash is compared against when there is no real hash to check, so a
+// rejection takes as long as a genuine mismatch.
+var dummyHash = []byte("$2a$12$oGCZQPPuY6cVMWk0lyKUJeaGvVeqGmZ.WnGvNPS7lIT/JqZQTgxOe")
+
+// maxPasswordBytes is bcrypt's limit; it ignores everything past it.
+const maxPasswordBytes = 72
+
+// comparePassword checks a password against a stored bcrypt hash. bcrypt only
+// reads the first 72 bytes, so without the length check any string that
+// merely starts with a 72-byte password would match it. No stored password can
+// be longer (setting one is refused), so a longer input is always wrong; the
+// dummy comparison keeps that rejection from being measurably faster.
+func comparePassword(hash, password string) error {
+	if len(password) > maxPasswordBytes {
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password[:maxPasswordBytes]))
+		return bcrypt.ErrMismatchedHashAndPassword
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
 // Authenticate checks an email and password pair.
@@ -103,13 +123,12 @@ func (s *Store) Authenticate(ctx context.Context, email, password string) (Admin
 		if errors.Is(err, ErrNotFound) {
 			// Spend the time anyway; a fast rejection tells an attacker the email
 			// is unknown.
-			_ = bcrypt.CompareHashAndPassword(
-				[]byte("$2a$12$oGCZQPPuY6cVMWk0lyKUJeaGvVeqGmZ.WnGvNPS7lIT/JqZQTgxOe"), []byte(password))
+			_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
 			return AdminUser{}, ErrBadCredentials
 		}
 		return AdminUser{}, err
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+	if err := comparePassword(user.PasswordHash, password); err != nil {
 		return AdminUser{}, ErrBadCredentials
 	}
 
@@ -118,6 +137,20 @@ func (s *Store) Authenticate(ctx context.Context, email, password string) (Admin
 		return user, err
 	}
 	return user, nil
+}
+
+// CheckPassword confirms an administrator's current password without signing
+// anything in or out. It guards the few actions that are worse than whatever a
+// stolen session could otherwise do, such as handing over the master key.
+func (s *Store) CheckPassword(ctx context.Context, userID, password string) error {
+	user, err := s.AdminByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if err := comparePassword(user.PasswordHash, password); err != nil {
+		return ErrBadCredentials
+	}
+	return nil
 }
 
 // ChangePassword re-hashes an administrator's password after checking the
@@ -137,7 +170,7 @@ func (s *Store) ChangePassword(ctx context.Context, userID, current, next string
 	if err != nil {
 		return err
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(current)); err != nil {
+	if err := comparePassword(user.PasswordHash, current); err != nil {
 		return errors.New("the current password is not correct")
 	}
 	if err := CheckPasswordStrength(next); err != nil {

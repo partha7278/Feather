@@ -1,0 +1,196 @@
+/* Runs, run detail, backups and audit log — page-only styles. Shared components live in /static/app.css. */
+
+/* --- shared bits of the activity pages ----------------------------------- */
+
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* A file name is one long token: let it wrap at its hyphens, never mid-word
+   into a one-character column. */
+.file-name {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 20px;
+  color: var(--text);
+  overflow-wrap: break-word;
+}
+
+/* One copy of an archive: status, alias and size on the first line; the full
+   location below in faint mono, broken anywhere so a long key fills its lines
+   instead of breaking at every hyphen. */
+.copy { align-items: flex-start; }
+.copy > .badge { min-width: 72px; }
+.copy-alias { font-weight: 500; color: var(--text); }
+.copy .where {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-faint);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.copy-error { display: block; margin-top: 2px; color: var(--bad); overflow-wrap: break-word; }
+
+/* --- runs list ------------------------------------------------------------ */
+
+.runs-table td.first { min-width: 11rem; }
+.runs-table td.first a { font-weight: 500; }
+.runs-table td.num.deleted { color: var(--warn); }
+.runs-table .row-error { max-width: 36ch; }
+.runs-table tr.has-error > td { vertical-align: top; }
+.runs-table tr.has-error > td:not(.first) { padding-top: 11px; }
+
+/* --- run detail ----------------------------------------------------------- */
+
+.run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text);
+}
+.run-meta > div { display: flex; gap: 6px; min-width: 0; }
+.run-meta dt { color: var(--text-faint); }
+.run-meta dd { margin: 0; min-width: 0; }
+.run-meta .run-id { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+
+.progress-panel { padding-bottom: 16px; }
+.progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.progress-head h2 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.progress-pct { font-size: 20px; line-height: 28px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+.progress-panel .progress { margin: 12px 0 8px; }
+.progress-panel p.hint { margin: 0; }
+.progress-panel p.hint strong { color: var(--text); font-weight: 600; }
+
+.run-stats { margin-bottom: 16px; }
+
+.files-table td.file-cell { min-width: 260px; }
+.files-table td.file-cell .dim, .files-table td.file-cell .sha { margin-top: 2px; }
+.files-table td.copies-cell { min-width: 320px; width: 45%; }
+.files-table .copies { gap: 12px; }
+
+/* Dry runs: numbers that would be, not numbers that were. */
+.runs-table td.not-uploaded { font-size: 12px; color: var(--text-faint); }
+.dry-run-notice strong { display: inline; margin: 0 4px 0 0; }
+
+/* A failed or partial run: the error, what happened to the data, where next. */
+.run-trouble .data-fate { margin: 8px 0 0; color: var(--text); }
+.run-trouble .data-fate strong { display: inline; margin: 0; }
+.run-trouble .data-fate .badge { vertical-align: 1px; }
+.next-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--bad-line);
+  font-size: 13px;
+}
+.next-steps-label { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+
+/* Restore / verify: one command per line, label left, copyable code right. */
+.restore-panel .restore-commands { display: grid; gap: 12px; margin: 0; }
+.restore-commands > div { display: grid; grid-template-columns: minmax(0, 16rem) minmax(0, 1fr); gap: 4px 16px; align-items: center; }
+.restore-commands dt { font-size: 13px; color: var(--text-dim); }
+.restore-commands dd { margin: 0; min-width: 0; }
+.restore-commands code.copy-block { margin: 0; font-family: var(--mono); font-size: 12.5px; cursor: text; }
+
+/* --- backups -------------------------------------------------------------- */
+
+.backups-table td.first { min-width: 300px; }
+.file-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-top: 2px; }
+.file-meta details.copies-details { margin-top: 0; }
+.file-meta details.copies-details > summary { color: var(--brand); }
+.file-meta details.copies-details > summary:hover { color: var(--brand-hover); }
+.file-meta details.copies-details[open] { flex-basis: 100%; }
+.file-meta details.copies-details[open] > summary { margin-bottom: 8px; }
+.copies-details .copies {
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  max-width: 560px;
+}
+.copies-details .sha {
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.backups-filters .toolbar-hint { flex: 1 1 100%; margin: -4px 0 0; font-size: 12px; color: var(--text-faint); }
+.run-scope { min-width: 0; }
+.run-scope .field-label { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 500; color: var(--text-dim); }
+.run-chip {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--brand-line);
+  border-radius: var(--radius-sm);
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+.run-chip:hover { color: var(--brand-hover); }
+
+/* --- audit log ------------------------------------------------------------ */
+
+.toolbar-buttons { display: flex; gap: 8px; }
+.audit-table td { vertical-align: top; }
+.audit-table td.what { min-width: 13rem; }
+.audit-table td.what .badge { display: flex; width: max-content; margin: 4px 0 0; }
+.audit-table .action-label { font-weight: 500; }
+.audit-table td.target { min-width: 12rem; max-width: 22rem; }
+.audit-table td.target .mono { font-size: 12.5px; overflow-wrap: break-word; }
+.audit-table td.who { min-width: 14rem; max-width: 20rem; }
+.audit-table .actor { overflow-wrap: break-word; }
+.audit-table .ip { word-break: break-all; }
+.audit-table td.detail { min-width: 12rem; }
+
+/* Destructive rows: a warn rule down the left edge, so they stand out while
+   scanning without turning the whole table orange. */
+.audit-table tr.is-destructive > td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.audit-table tr.is-destructive > td { background-color: color-mix(in srgb, var(--warn-soft) 70%, var(--surface)); }
+.audit-table tbody tr.is-destructive:hover > td { background-color: var(--warn-soft); }
+
+/* --- narrow screens -------------------------------------------------------- */
+
+@media (max-width: 860px) {
+  .runs-table td.first { min-width: 10rem; }
+  .runs-table .row-error { max-width: 12rem; }
+
+  .run-meta { gap: 4px 16px; }
+  .run-meta > div:last-child { flex-basis: 100%; }
+  .restore-commands > div { grid-template-columns: minmax(0, 1fr); }
+
+  .grid.stats.strip.run-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.stats.strip.run-stats .stat:last-child { grid-column: 1 / -1; }
+
+  .files-table td.file-cell { min-width: 220px; }
+  .files-table td.copies-cell { min-width: 280px; }
+
+  /* The file tables use the shared stacked rows (table.stack in app.css). */
+  table.stack .file-name { white-space: normal; }
+  .table-wrap table.stack.files-table td.seq, .table-wrap table.stack.files-table td.seq:first-child { display: none; }
+  table.stack .copy > .badge { min-width: 0; }
+  .backups-table td[data-label="Data range"] div { display: inline; }
+  table.stack.files-table tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+  .copies-details .copies { max-width: none; }
+
+  .backups-filters .field.grow { flex-basis: 100%; }
+  .audit-filters .field:not(:first-child) { flex: 1 1 calc(50% - 6px); min-width: 0; }
+
+  .toolbar-buttons { flex: 1 1 100%; }
+
+  /* Stacked audit rows: the action is the title, the time and the rest
+     below it; a destructive row keeps its warn edge on the whole block. */
+  table.stack.audit-table td.what { order: -1; grid-column: 1 / -1; }
+  table.stack.audit-table td.what .badge { display: inline-flex; margin: 0 0 0 6px; vertical-align: 0; }
+  table.stack.audit-table tr.is-destructive { box-shadow: inset 3px 0 0 var(--warn); background: color-mix(in srgb, var(--warn-soft) 70%, var(--surface)); }
+  .table-wrap table.stack.audit-table tr.is-destructive > td:first-child { box-shadow: none; }
+}

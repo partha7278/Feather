@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -70,7 +71,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			"Deleting": deleting,
 			"Running":  running,
 			"NeedsSetupSteps": map[string]bool{
-				"mongo":        totals.MongoSources == 0,
+				// Either engine will do: the step is "have something to
+				// archive from".
+				"mongo":        totals.MongoSources == 0 && totals.PostgresSources == 0,
 				"destinations": totals.Destinations == 0,
 				"configs":      totals.Configs == 0,
 			},
@@ -244,7 +247,7 @@ func (s *Server) handleArtifactDownload(w http.ResponseWriter, r *http.Request) 
 		fmt.Sprintf("%s from %s", item.FileName, alias))
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(item.FileName)+`"`)
+	w.Header().Set("Content-Disposition", attachmentDisposition(item.FileName))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
 	if item.BytesCompressed > 0 {
@@ -258,6 +261,35 @@ func (s *Server) handleArtifactDownload(w http.ResponseWriter, r *http.Request) 
 		s.log.Warn("archive download did not complete",
 			"archive", item.FileName, "destination", alias, "error", err)
 	}
+}
+
+// attachmentDisposition builds a Content-Disposition header for a file name
+// that came out of the catalogue. The name is not trusted: control characters
+// are dropped so it cannot break the header, path separators are cut away, and
+// mime.FormatMediaType does the quoting, so a quote cannot smuggle in extra
+// parameters.
+func attachmentDisposition(fileName string) string {
+	name := strings.Map(func(c rune) rune {
+		if c < 0x20 || c == 0x7f {
+			return -1
+		}
+		return c
+	}, fileName)
+	name = filepath.Base(strings.ReplaceAll(name, `\`, "/"))
+	if name == "." || name == "/" {
+		name = ""
+	}
+	if name != "" {
+		if header := mime.FormatMediaType("attachment", map[string]string{"filename": name}); header != "" {
+			// A plain token comes back unquoted; quoting a token is always
+			// safe and keeps the header the shape it has always had.
+			if header == "attachment; filename="+name {
+				return `attachment; filename="` + name + `"`
+			}
+			return header
+		}
+	}
+	return mime.FormatMediaType("attachment", map[string]string{"filename": "archive.ndjson.gz"})
 }
 
 // openArchive finds a readable copy of an archive, trying each destination in

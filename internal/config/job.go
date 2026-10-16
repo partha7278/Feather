@@ -35,11 +35,28 @@ type JobConfig struct {
 }
 
 type Source struct {
+	// Engine is the kind of database the config reads: EngineMongo (the
+	// default, and what an absent value means) or EnginePostgres. It is left
+	// empty for MongoDB rather than filled in, so every config stored before
+	// Postgres existed keeps the fingerprint its runs were recorded against.
+	Engine string `json:"engine,omitempty"`
+
 	// MongoSource names the stored MongoDB account to read from. Several may be
 	// configured, so a single feather can serve clusters that share nothing.
-	MongoSource    string          `json:"mongoSource"`
-	Database       string          `json:"database"`
-	Collection     string          `json:"collection"`
+	MongoSource string `json:"mongoSource"`
+	// PostgresSource names the stored PostgreSQL account, for EnginePostgres.
+	PostgresSource string `json:"postgresSource,omitempty"`
+
+	// Database and Collection are the namespace. For PostgreSQL they are the
+	// schema and the table: the database itself is fixed by the account's
+	// connection string. Reusing the fields keeps the catalogue, the key
+	// template's {db}/{collection} and every page that shows a namespace
+	// working unchanged for both engines.
+	Database   string `json:"database"`
+	Collection string `json:"collection"`
+
+	// Filter is MongoDB Extended JSON for MongoDB, and for PostgreSQL a JSON
+	// string holding the body of a WHERE clause — see SQLFilter.
 	Filter         json.RawMessage `json:"filter"`
 	Projection     json.RawMessage `json:"projection,omitempty"`
 	ReadPreference string          `json:"readPreference"`
@@ -49,8 +66,52 @@ type Source struct {
 // Catalog is the set of accounts a job may refer to, used to check that its
 // aliases resolve to something that actually exists.
 type Catalog struct {
-	Destinations map[string]Destination
-	Sources      map[string]MongoSource
+	Destinations    map[string]Destination
+	Sources         map[string]MongoSource
+	PostgresSources map[string]PostgresSource
+}
+
+const (
+	EngineMongo    = "mongodb"
+	EnginePostgres = "postgres"
+)
+
+// EngineName is the engine with the default applied.
+func (s Source) EngineName() string {
+	if s.Engine == "" {
+		return EngineMongo
+	}
+	return s.Engine
+}
+
+// IsPostgres reports whether the config reads from PostgreSQL.
+func (s Source) IsPostgres() bool { return s.Engine == EnginePostgres }
+
+// Account is the alias of the account the config reads, whichever engine.
+func (s Source) Account() string {
+	if s.IsPostgres() {
+		return s.PostgresSource
+	}
+	return s.MongoSource
+}
+
+// SQLFilter is a PostgreSQL config's WHERE clause, unresolved: time tokens are
+// still in it. An absent filter is the empty string, meaning every row.
+func (s Source) SQLFilter() (string, error) {
+	if len(s.Filter) == 0 {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(s.Filter, &text); err != nil {
+		return "", fmt.Errorf("source.filter for a PostgreSQL config must be a string holding a SQL condition")
+	}
+	return strings.TrimSpace(text), nil
+}
+
+// SQLFilterJSON encodes a SQL condition the way Source.Filter stores it.
+func SQLFilterJSON(condition string) json.RawMessage {
+	encoded, _ := json.Marshal(strings.TrimSpace(condition))
+	return encoded
 }
 
 type Batch struct {
@@ -131,6 +192,14 @@ func (c *JobConfig) applyDefaults() {
 	if c.Source.ReadPreference == "" {
 		c.Source.ReadPreference = "primary"
 	}
+	if c.Source.IsPostgres() {
+		if c.Source.Database == "" {
+			c.Source.Database = "public"
+		}
+		if len(c.Source.Filter) == 0 {
+			c.Source.Filter = SQLFilterJSON("")
+		}
+	}
 	if len(c.Source.Filter) == 0 {
 		c.Source.Filter = json.RawMessage(`{}`)
 	}
@@ -185,12 +254,23 @@ func (c *JobConfig) Validate(known Catalog) error {
 		return err
 	}
 
-	if c.Source.MongoSource == "" {
-		return fmt.Errorf("source.mongoSource is required — name the MongoDB account to read from")
-	}
-	if known.Sources != nil {
-		if _, ok := known.Sources[c.Source.MongoSource]; !ok {
-			return fmt.Errorf("source.mongoSource %q is not a configured MongoDB account", c.Source.MongoSource)
+	if c.Source.IsPostgres() {
+		if c.Source.PostgresSource == "" {
+			return fmt.Errorf("source.postgresSource is required — name the PostgreSQL account to read from")
+		}
+		if known.PostgresSources != nil {
+			if _, ok := known.PostgresSources[c.Source.PostgresSource]; !ok {
+				return fmt.Errorf("source.postgresSource %q is not a configured PostgreSQL account", c.Source.PostgresSource)
+			}
+		}
+	} else {
+		if c.Source.MongoSource == "" {
+			return fmt.Errorf("source.mongoSource is required — name the MongoDB account to read from")
+		}
+		if known.Sources != nil {
+			if _, ok := known.Sources[c.Source.MongoSource]; !ok {
+				return fmt.Errorf("source.mongoSource %q is not a configured MongoDB account", c.Source.MongoSource)
+			}
 		}
 	}
 	for _, alias := range c.Destinations {
@@ -230,6 +310,66 @@ func (c *JobConfig) Prepare() error {
 	if !nameRe.MatchString(c.Name) {
 		return fmt.Errorf("name %q must match %s", c.Name, nameRe)
 	}
+	switch c.Source.EngineName() {
+	case EngineMongo:
+		if err := c.prepareMongoSource(); err != nil {
+			return err
+		}
+	case EnginePostgres:
+		if err := c.preparePostgresSource(); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("source.engine %q is unsupported (want %q or %q)", c.Source.Engine, EngineMongo, EnginePostgres)
+	}
+
+	switch c.Output.Format {
+	case FormatNDJSON:
+	default:
+		return fmt.Errorf("output.format %q is unsupported (only %q)", c.Output.Format, FormatNDJSON)
+	}
+
+	switch c.Compression.Codec {
+	case CodecGzip:
+		if c.Compression.Level < 1 || c.Compression.Level > 9 {
+			return fmt.Errorf("compression.level %d is out of range for gzip (1-9)", c.Compression.Level)
+		}
+	case CodecZstd:
+		if c.Compression.Level < 1 || c.Compression.Level > 4 {
+			return fmt.Errorf("compression.level %d is out of range for zstd (1=fastest .. 4=best)", c.Compression.Level)
+		}
+	default:
+		return fmt.Errorf("compression.codec %q is unsupported (want %q or %q)", c.Compression.Codec, CodecGzip, CodecZstd)
+	}
+
+	if len(c.Destinations) == 0 {
+		return fmt.Errorf("at least one destination is required — Feather will not delete data it has not stored somewhere")
+	}
+	seen := map[string]bool{}
+	for _, alias := range c.Destinations {
+		if seen[alias] {
+			return fmt.Errorf("destination %q is listed twice", alias)
+		}
+		seen[alias] = true
+	}
+
+	if err := ValidateKeyTemplate(c.Output.KeyTemplate); err != nil {
+		return fmt.Errorf("output.keyTemplate: %w", err)
+	}
+	// The {runId} requirement is deliberately not enforced here. Prepare runs on
+	// every stored config at every boot, and an installation that predates the
+	// rule would be unable to start. CheckSafeToRun applies it where it counts —
+	// on save, and before a run — so an existing config is loaded, listed and
+	// visibly flagged rather than taking the process down with it.
+
+	if err := c.Schedule.resolve(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *JobConfig) prepareMongoSource() error {
 	if c.Source.Database == "" {
 		return fmt.Errorf("source.database is required")
 	}
@@ -254,53 +394,32 @@ func (c *JobConfig) Prepare() error {
 		return fmt.Errorf("source.readPreference %q is not a valid MongoDB read preference", c.Source.ReadPreference)
 	}
 
-	switch c.Output.Format {
-	case FormatNDJSON:
-	default:
-		return fmt.Errorf("output.format %q is unsupported (only %q)", c.Output.Format, FormatNDJSON)
-	}
-
-	switch c.Compression.Codec {
-	case CodecGzip:
-		if c.Compression.Level < 1 || c.Compression.Level > 9 {
-			return fmt.Errorf("compression.level %d is out of range for gzip (1-9)", c.Compression.Level)
-		}
-	case CodecZstd:
-		if c.Compression.Level < 1 || c.Compression.Level > 4 {
-			return fmt.Errorf("compression.level %d is out of range for zstd (1=fastest .. 4=best)", c.Compression.Level)
-		}
-	default:
-		return fmt.Errorf("compression.codec %q is unsupported (want %q or %q)", c.Compression.Codec, CodecGzip, CodecZstd)
-	}
-
-	if len(c.Destinations) == 0 {
-		return fmt.Errorf("at least one destination is required — feather will not delete data it has not stored somewhere")
-	}
-	seen := map[string]bool{}
-	for _, alias := range c.Destinations {
-		if seen[alias] {
-			return fmt.Errorf("destination %q is listed twice", alias)
-		}
-		seen[alias] = true
-	}
-
-	if err := ValidateKeyTemplate(c.Output.KeyTemplate); err != nil {
-		return fmt.Errorf("output.keyTemplate: %w", err)
-	}
-	// The {runId} requirement is deliberately not enforced here. Prepare runs on
-	// every stored config at every boot, and an installation that predates the
-	// rule would be unable to start. CheckSafeToRun applies it where it counts —
-	// on save, and before a run — so an existing config is loaded, listed and
-	// visibly flagged rather than taking the process down with it.
-
-	if err := c.Schedule.resolve(); err != nil {
-		return err
-	}
-
 	if _, err := ResolveTimeTokens(c.Source.Filter, time.Now()); err != nil {
 		return fmt.Errorf("source.filter: %w", err)
 	}
+	return nil
+}
 
+func (c *JobConfig) preparePostgresSource() error {
+	if c.Source.Collection == "" {
+		return fmt.Errorf("source.collection is required — name the table to archive")
+	}
+	// A projection would make every archived row partial, and a partial row
+	// cannot be put back. MongoDB tolerates that as an expert's choice; for a
+	// table, whose rows restore by column, it is only ever a way to lose data.
+	if len(c.Source.Projection) > 0 {
+		return fmt.Errorf("source.projection is not supported for PostgreSQL — whole rows are archived so they can be restored")
+	}
+	filter, err := c.Source.SQLFilter()
+	if err != nil {
+		return err
+	}
+	if filter == "" && c.Retention.DeleteAfterArchive && c.Limits.MaxDocsPerRun <= 0 {
+		return fmt.Errorf("source.filter is empty while retention.deleteAfterArchive is true — that would delete the entire table; set a filter or a limits.maxDocsPerRun cap")
+	}
+	if _, err := ResolveSQLTimeTokens(filter, time.Now()); err != nil {
+		return fmt.Errorf("source.filter: %w", err)
+	}
 	return nil
 }
 

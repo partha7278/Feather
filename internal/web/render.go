@@ -57,7 +57,9 @@ type pageData struct {
 	LoggedIn bool
 	CSRF     string
 	Flash    *flash
-	Now      time.Time
+	// Theme is "light", "dark", or "" to follow the operating system.
+	Theme string
+	Now   time.Time
 	// Refresh, in seconds, makes the page reload itself. Set only while there
 	// is something changing to watch — a run in flight — so that pages sitting
 	// open do not poll the database forever.
@@ -78,6 +80,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	}
 
 	data.Now = time.Now()
+	data.Theme = themeFrom(r)
 	// A handler that rendered its own message keeps it; anything left over from
 	// a redirect is picked up here. Reading the cookie either way clears it, so
 	// a stale message cannot surface on the next page.
@@ -117,7 +120,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 
 func (s *Server) serverError(w http.ResponseWriter, r *http.Request, err error) {
 	s.log.Error("request failed", "path", r.URL.Path, "error", err)
-	http.Error(w, "Something went wrong. Check the feather log for details.", http.StatusInternalServerError)
+	http.Error(w, "Something went wrong. Check the Feather log for details.", http.StatusInternalServerError)
 }
 
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
@@ -174,12 +177,51 @@ func takeFlash(w http.ResponseWriter, r *http.Request) *flash {
 	return &flash{Kind: kind, Message: message}
 }
 
+// --- theme -----------------------------------------------------------------
+
+// themeCookie holds the theme switch's choice. It is read by the server, not
+// by a script in <head>, because the CSP forbids inline JavaScript and the
+// page would otherwise paint in the wrong theme first. It is not HttpOnly:
+// app.js writes it so the switch applies without a reload.
+const themeCookie = "feather_theme"
+
+func themeFrom(r *http.Request) string {
+	cookie, err := r.Cookie(themeCookie)
+	if err != nil {
+		return ""
+	}
+	if cookie.Value == "light" || cookie.Value == "dark" {
+		return cookie.Value
+	}
+	return ""
+}
+
+// handleTheme is the switch's fallback when app.js is not running.
+func (s *Server) handleTheme(w http.ResponseWriter, r *http.Request) {
+	cookie := &http.Cookie{
+		Name:     themeCookie,
+		Path:     "/",
+		Secure:   s.secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   400 * 24 * 60 * 60,
+	}
+	switch theme := r.PostFormValue("theme"); theme {
+	case "light", "dark":
+		cookie.Value = theme
+	default:
+		cookie.MaxAge = -1
+	}
+	http.SetCookie(w, cookie)
+	s.redirectBack(w, r, "/")
+}
+
 // --- template helpers ------------------------------------------------------
 
 var templateFuncs = template.FuncMap{
 	"bytes":       config.HumanBytes,
 	"number":      humanNumber,
 	"datetime":    formatDateTime,
+	"datetimeAt":  formatDateTimeAt,
 	"date":        formatDate,
 	"since":       humanSince,
 	"duration":    humanDuration,
@@ -232,6 +274,15 @@ func formatDateTime(t any) string {
 	default:
 		return "—"
 	}
+}
+
+// formatDateTimeAt formats t in its own location rather than the server's, so a
+// schedule's next run reads in the timezone the schedule was written in.
+func formatDateTimeAt(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	return t.Format("2 Jan 2006, 15:04")
 }
 
 func formatDate(t any) string {

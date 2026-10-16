@@ -1,10 +1,14 @@
 {{define "content"}}
-<div class="card">
-  <h2>{{.Data.Heading}}</h2>
-  <p>{{.Data.Message}}</p>
+<div class="card error-card">
+  <span class="error-mark" aria-hidden="true">{{template "icon-alert"}}</span>
+  <h2 id="error-title">{{.Data.Heading}}</h2>
+  <p class="error-message">{{.Data.Message}}</p>
   {{if .Data.Detail}}
-    <pre class="mono small">{{.Data.Detail}}</pre>
+    <pre class="code error-detail">{{.Data.Detail}}</pre>
   {{end}}
-  <p><a class="btn" href="{{.Data.Back}}">Go back</a></p>
+  <div class="button-row">
+    <a class="btn primary" href="{{.Data.Back}}">{{template "icon-arrow-left"}} Go back</a>
+    <a class="btn ghost" href="/">Overview</a>
+  </div>
 </div>
 {{end}}

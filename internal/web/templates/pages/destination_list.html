@@ -2,69 +2,78 @@
 <div class="page-head">
   <div>
     <h1>Backup destinations</h1>
-    <p>Where archives are written. A retention config can name several, and every one receives a full copy — nothing is deleted from MongoDB until all of them are verified.</p>
+    <p>Where archives are written. Nothing is deleted until every copy is verified.</p>
   </div>
+  {{if .Data.Destinations}}
   <div class="page-actions">
     <a class="btn primary" href="/destinations/new">{{template "icon-plus"}} Add destination</a>
   </div>
+  {{end}}
 </div>
 
-<div class="card">
+<div class="card flush">
   {{if .Data.Destinations}}
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Backup destinations">
+    <table class="align-top acct-table stack">
       <thead>
-        <tr><th>Alias</th><th>Provider</th><th>Bucket / folder</th><th>Region / endpoint</th><th>Holding</th><th>Last test</th><th>Used by</th><th></th></tr>
+        <tr><th scope="col">Destination</th><th scope="col">Location</th><th scope="col" class="num">Holding</th><th scope="col">Last test</th><th scope="col">Used by</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
       </thead>
       <tbody>
       {{range .Data.Destinations}}
         {{$usage := index $.Data.Usage .Alias}}
         {{$isDrive := eq (print .Provider) "gdrive"}}
         <tr>
-          <td>
-            <a href="/destinations/{{.ID}}"><strong>{{.Alias}}</strong></a>
-            {{if not .Enabled}}<span class="badge muted">disabled</span>{{end}}
-            {{if not .Ready}}<span class="badge bad">not connected</span>{{end}}
-            {{if .Note}}<div class="small dim">{{.Note}}</div>{{end}}
+          <td class="first">
+            <a href="/destinations/{{.ID}}">{{.Alias}}</a>{{if not .Enabled}}<span class="badge muted">disabled</span>{{end}}
+            <div class="small dim">{{.Provider.Label}}{{if .StorageClass}} · {{.StorageClass}}{{end}}</div>
+            {{if .Note}}<div class="small dim clamp" title="{{.Note}}">{{.Note}}</div>{{end}}
           </td>
-          <td>
-            <span class="badge muted">{{.Provider.Label}}</span>
-            {{if .StorageClass}}<div class="small dim">{{.StorageClass}}</div>{{end}}
-          </td>
-          <td class="mono small break">
-            {{if $isDrive}}{{.DriveRoot}}{{else}}{{.Bucket}}{{end}}{{if .Prefix}}<span class="dim">/{{.Prefix}}</span>{{end}}
-          </td>
-          <td class="small dim break">
+          <td class="acct-where span" data-label="Location">
+            <span class="mono acct-truncate" title="{{if $isDrive}}{{.DriveRoot}}{{else}}{{.Bucket}}{{end}}{{if .Prefix}}/{{.Prefix}}{{end}}">{{if $isDrive}}{{.DriveRoot}}{{else}}{{.Bucket}}{{end}}{{if .Prefix}}<span class="dim">/{{.Prefix}}</span>{{end}}</span>
+            <div class="small dim acct-truncate">
             {{if $isDrive}}
-              {{if .DriveID}}shared drive <span class="mono">{{.DriveID}}</span>{{else if .ServiceAccountJSON}}service account{{else}}OAuth client{{end}}
+              {{if .DriveID}}Shared drive <span class="mono">{{.DriveID}}</span>{{else if .ServiceAccountJSON}}Service account{{else}}OAuth client{{end}}
             {{else}}
-              {{.Region}}{{if .Endpoint}}<div class="mono">{{.Endpoint}}</div>{{end}}
+              <span title="{{.Region}}{{if .Endpoint}} · {{.Endpoint}}{{end}}">{{.Region}}{{if .Endpoint}} · <span class="mono">{{.Endpoint}}</span>{{end}}</span>
             {{end}}
+            </div>
           </td>
-          <td class="small">
-            {{if $usage.Objects}}{{number $usage.Objects}} objects<div class="dim">{{bytes $usage.Bytes}}</div>{{else}}<span class="dim">—</span>{{end}}
+          <td class="small num" data-label="Holding">
+            {{if $usage.Objects}}{{number $usage.Objects}} objects<div class="dim">{{bytes $usage.Bytes}}</div>{{else}}<span class="zero">—</span>{{end}}
           </td>
-          <td class="small">
-            {{if .Check.Tested}}
-              {{if .Check.OK}}<span class="badge good">reachable</span>{{else}}<span class="badge bad">failed</span>{{end}}
-              <div class="dim small">{{since .Check.At}}</div>
-              {{if .Check.Error}}<div class="dim small break">{{truncate 140 .Check.Error}}</div>{{end}}
-            {{else}}<span class="badge muted">not tested</span>{{end}}
+          <td class="small acct-check" data-label="Last test">
+            {{if not .Ready}}
+              <span class="status-dot bad">Not connected</span>
+              <div class="dim">Sign in to Google Drive so configs can write here.</div>
+            {{else if .Check.Tested}}
+              <span class="status-dot {{if .Check.OK}}good{{else}}bad{{end}}">{{if .Check.OK}}Reachable{{else}}Failed{{end}}</span> <span class="dim">· {{since .Check.At}}</span>
+              {{if .Check.Error}}<div class="dim clamp" title="{{.Check.Error}}">{{truncate 140 .Check.Error}}</div>{{end}}
+            {{else}}<span class="status-dot muted">Not tested</span>{{end}}
           </td>
-          <td class="small dim">
+          <td class="small acct-used" data-label="Used by">
             {{$used := index $.Data.UsedBy .Alias}}
-            {{if $used}}{{range $i, $name := $used}}{{if $i}}, {{end}}{{$name}}{{end}}{{else}}—{{end}}
+            {{if $used}}{{range $i, $name := $used}}{{if $i}}, {{end}}{{$name}}{{end}}{{else}}<span class="dim acct-unused">Not used</span>{{end}}
           </td>
           <td class="actions">
+            {{if .Ready}}
             <form method="post" action="/destinations/{{.ID}}/test">
               <input type="hidden" name="csrf" value="{{$.CSRF}}">
               <button class="btn small" type="submit">Test</button>
             </form>
-            <a class="btn small" href="/destinations/{{.ID}}">Edit</a>
-            <form method="post" action="/destinations/{{.ID}}/delete" data-confirm="Remove the destination {{.Alias}}? Objects already written stay in the bucket.">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <button class="btn small danger" type="submit">Remove</button>
-            </form>
+            {{else}}
+            <a class="btn small" href="/destinations/{{.ID}}">Connect</a>
+            {{end}}
+            <details class="row-menu">
+              <summary class="btn small ghost icon-only" aria-label="More actions for {{.Alias}}" title="More actions">{{template "icon-more"}}</summary>
+              <div class="menu" role="menu">
+                <a class="menu-item" href="/destinations/{{.ID}}" role="menuitem">{{template "icon-pencil"}}Edit</a>
+                <div class="menu-sep" role="separator"></div>
+                <form method="post" action="/destinations/{{.ID}}/delete" data-confirm="Remove the destination {{.Alias}}? Objects already written stay in the bucket.">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <button class="menu-item danger" type="submit" role="menuitem">{{template "icon-trash"}}Remove</button>
+                </form>
+              </div>
+            </details>
           </td>
         </tr>
       {{end}}
@@ -73,9 +82,10 @@
   </div>
   {{else}}
   <div class="empty">
+    <span class="empty-icon">{{template "icon-cloud"}}</span>
     <h3>No destinations yet</h3>
-    <p>Add an AWS S3 bucket, an Oracle Cloud Object Storage bucket, or a Google Drive folder. feather refuses to delete data it has not stored somewhere, so at least one is required.</p>
-    <a class="btn primary" href="/destinations/new">Add the first destination</a>
+    <p>Add an S3 bucket, Oracle Object Storage, or a Google Drive folder. Feather never deletes data it has not stored somewhere first.</p>
+    <a class="btn primary" href="/destinations/new">{{template "icon-plus"}} Add destination</a>
   </div>
   {{end}}
 </div>

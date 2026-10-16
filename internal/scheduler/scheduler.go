@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -72,7 +73,7 @@ func New(ctx, runCtx context.Context, jobs []*config.JobConfig, r *runner.Runner
 		store:  st,
 		log:    log,
 		slots:  make(chan struct{}, maxConcurrent),
-		cron:   cron.New(),
+		cron:   newCron(log),
 		runCtx: runCtx,
 	}
 	if err := s.load(ctx, s.cron, jobs); err != nil {
@@ -120,6 +121,13 @@ func (s *Scheduler) add(ctx context.Context, c *cron.Cron, job *config.JobConfig
 		if err != nil {
 			return fmt.Errorf("config %s: schedule.cron %q: %w", job.Name, job.Schedule.Cron, err)
 		}
+		// "@every" bypasses the interval form's one-minute floor unless it is
+		// checked here too. The parser has already rounded the delay to whole
+		// seconds and lifted anything below a second (negative included) to one,
+		// so the parsed delay is what would actually run.
+		if every, ok := parsed.(cron.ConstantDelaySchedule); ok && every.Delay < time.Minute {
+			return fmt.Errorf("config %s: schedule.cron %q is below the one minute minimum", job.Name, job.Schedule.Cron)
+		}
 		e.schedule = timezoned{inner: parsed, loc: job.Schedule.Location}
 	} else {
 		// Anchor the interval on the last completed run so restarts do not
@@ -148,7 +156,7 @@ func (s *Scheduler) add(ctx context.Context, c *cron.Cron, job *config.JobConfig
 // Reload rebuilds the schedule from a new set of configs. Runs already in
 // flight are left alone — they hold their own job lease and finish normally.
 func (s *Scheduler) Reload(ctx context.Context, jobs []*config.JobConfig) error {
-	fresh := cron.New()
+	fresh := newCron(s.log)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -229,6 +237,15 @@ func (s *Scheduler) fire(e *entry) {
 	if track != nil {
 		defer track()()
 	}
+	// Deferred between the tracking hook and the slot, so on a panic the slot
+	// is released, then the panic is stopped here, then the tracking hook is
+	// released. A run that panics after creating its record is
+	// finalised by the runner; all the scheduler can do is keep the process up.
+	defer func() {
+		if p := recover(); p != nil {
+			s.log.Error("scheduled run panicked", "config", e.job.Name, "panic", p, "stack", string(debug.Stack()))
+		}
+	}()
 
 	select {
 	case s.slots <- struct{}{}:
@@ -246,6 +263,24 @@ func (s *Scheduler) fire(e *entry) {
 	if _, err := s.runner.Run(ctx, e.job, store.TriggerCron); err != nil && !errors.Is(err, runner.ErrLocked) {
 		s.log.Error("scheduled run failed", "config", e.job.Name, "error", err)
 	}
+}
+
+// newCron builds a cron instance whose jobs cannot take the process down: fire
+// recovers its own panics, and the Recover wrapper is the backstop for
+// anything outside it.
+func newCron(log *slog.Logger) *cron.Cron {
+	return cron.New(cron.WithChain(cron.Recover(cronLogger{log})))
+}
+
+// cronLogger adapts slog to the logger interface robfig/cron expects.
+type cronLogger struct{ log *slog.Logger }
+
+func (l cronLogger) Info(msg string, keysAndValues ...any) {
+	l.log.Debug("cron: "+msg, keysAndValues...)
+}
+
+func (l cronLogger) Error(err error, msg string, keysAndValues ...any) {
+	l.log.Error("cron: "+msg, append(keysAndValues, "error", err)...)
 }
 
 // timezoned evaluates a cron expression in the job's own timezone, so

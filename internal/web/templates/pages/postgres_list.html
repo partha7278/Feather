@@ -1,0 +1,74 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>PostgreSQL accounts</h1>
+    <p>The databases Feather archives tables from; connection strings are encrypted and never shown again.</p>
+  </div>
+  {{if .Data.Sources}}
+  <div class="page-actions">
+    <a class="btn primary" href="/postgres/new">{{template "icon-plus"}} Add PostgreSQL account</a>
+  </div>
+  {{end}}
+</div>
+
+<div class="card flush">
+  {{if .Data.Sources}}
+  <div class="table-wrap" tabindex="0" role="region" aria-label="PostgreSQL accounts">
+    <table class="align-top acct-table stack">
+      <thead>
+        <tr><th scope="col">PostgreSQL account</th><th scope="col">Connection</th><th scope="col">Last test</th><th scope="col">Used by</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+      </thead>
+      <tbody>
+      {{range .Data.Sources}}
+        <tr>
+          <td class="first">
+            <a href="/postgres/{{.ID}}">{{.Alias}}</a>{{if not .Enabled}}<span class="badge muted">disabled</span>{{end}}
+            {{if .Note}}<div class="small dim clamp" title="{{.Note}}">{{.Note}}</div>{{end}}
+          </td>
+          <td class="acct-where span" data-label="Connection">
+            <span class="mono acct-truncate" title="{{.Preview}}">{{.Preview}}</span>
+          </td>
+          <td class="small acct-check" data-label="Last test">
+            {{if .Check.Tested}}
+              <span class="status-dot {{if .Check.OK}}good{{else}}bad{{end}}">{{if .Check.OK}}Reachable{{else}}Failed{{end}}</span> <span class="dim">· {{since .Check.At}}</span>
+              {{if .Check.Error}}<div class="dim clamp" title="{{.Check.Error}}">{{truncate 140 .Check.Error}}</div>{{end}}
+            {{else}}
+              <span class="status-dot muted">Not tested</span>
+            {{end}}
+          </td>
+          <td class="small acct-used" data-label="Used by">
+            {{$used := index $.Data.UsedBy .Alias}}
+            {{if $used}}{{range $i, $name := $used}}{{if $i}}, {{end}}{{$name}}{{end}}{{else}}<span class="dim acct-unused">Not used</span>{{end}}
+          </td>
+          <td class="actions">
+            <form method="post" action="/postgres/{{.ID}}/test">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="btn small" type="submit">Test</button>
+            </form>
+            <details class="row-menu">
+              <summary class="btn small ghost icon-only" aria-label="More actions for {{.Alias}}" title="More actions">{{template "icon-more"}}</summary>
+              <div class="menu" role="menu">
+                <a class="menu-item" href="/postgres/{{.ID}}" role="menuitem">{{template "icon-pencil"}}Edit</a>
+                <div class="menu-sep" role="separator"></div>
+                <form method="post" action="/postgres/{{.ID}}/delete" data-confirm="Remove the PostgreSQL account {{.Alias}}?">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <button class="menu-item danger" type="submit" role="menuitem">{{template "icon-trash"}}Remove</button>
+                </form>
+              </div>
+            </details>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty">
+    <span class="empty-icon">{{template "icon-database"}}</span>
+    <h3>No PostgreSQL accounts yet</h3>
+    <p>Add the database you want to archive tables from. Each retention config names the account it reads.</p>
+    <a class="btn primary" href="/postgres/new">{{template "icon-plus"}} Add PostgreSQL account</a>
+  </div>
+  {{end}}
+</div>
+{{end}}

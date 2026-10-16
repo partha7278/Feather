@@ -1,22 +1,25 @@
 {{define "content"}}
+<div class="configs-page">
 <div class="page-head">
   <div>
     <h1>Retention configs</h1>
-    <p>One config is one job: a collection, a filter, the destinations that receive a copy, a schedule, and whether the source documents are deleted once every copy is verified.</p>
+    <p>Each config archives one collection or table on a schedule, and may delete the originals once every copy is verified.</p>
   </div>
+  {{if .Data.Jobs}}
   <div class="page-actions">
     <a class="btn primary" href="/configs/new">{{template "icon-plus"}} New config</a>
   </div>
+  {{end}}
 </div>
 
-<div class="card">
+<div class="card flush">
   {{if .Data.Jobs}}
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Retention configs">
+    <table class="configs-table stack align-top">
       <thead>
         <tr>
-          <th>Config</th><th>Source</th><th>Destinations</th><th>Schedule</th>
-          <th>After archive</th><th>Last run</th><th></th>
+          <th scope="col">Config</th><th scope="col">Schedule</th><th scope="col">Destinations</th>
+          <th scope="col">After archiving</th><th scope="col">Last run</th><th scope="col"><span class="visually-hidden">Actions</span></th>
         </tr>
       </thead>
       <tbody>
@@ -24,63 +27,95 @@
         {{$job := .Config}}
         {{$last := index $.Data.Latest $job.Name}}
         {{$running := index $.Data.Running $job.Name}}
+        {{$deletes := $job.Retention.DeleteAfterArchive}}
+        {{$dryFirst := or $deletes $last.StartedAt.IsZero}}
         <tr>
-          <td class="nowrap">
-            <a href="/configs/{{.ID}}"><strong>{{$job.Name}}</strong></a>
-            {{if not $job.IsEnabled}}<span class="badge muted">paused</span>{{end}}
-            {{if $job.DryRun}}<span class="badge muted">dry run</span>{{end}}
-            {{if $running}}<span class="badge busy">running</span>{{end}}
+          <td class="first cfg-cell">
+            <div class="cfg-name">
+              <a href="/configs/{{.ID}}" title="{{$job.Name}}">{{$job.Name}}</a>
+              {{if not $job.IsEnabled}}<span class="badge muted">paused</span>{{end}}
+              {{if $job.DryRun}}<span class="badge muted">dry run</span>{{end}}
+            </div>
+            <div class="cfg-source small dim">{{$job.Source.Database}}.{{$job.Source.Collection}} · {{$job.Source.Account}}{{if $job.Source.IsPostgres}} <span class="badge muted">PostgreSQL</span>{{end}}</div>
           </td>
-          <td class="small">
-            {{$job.Source.Database}}.{{$job.Source.Collection}}
-            <div class="dim mono">{{truncate 60 (compactJSON (printf "%s" $job.Source.Filter))}}</div>
-            <div class="dim">via {{$job.Source.MongoSource}}</div>
-          </td>
-          <td class="small">
-            {{range $job.Destinations}}<div>{{.}}</div>{{end}}
-          </td>
-          <td class="small nowrap">
-            {{if $job.Schedule.Cron}}cron {{$job.Schedule.Cron}}
-            {{else}}every {{$job.Schedule.Every}}{{if $job.Schedule.At}} at {{$job.Schedule.At}}{{end}}{{end}}
-            <div class="dim">{{$job.Schedule.Timezone}}</div>
+          <td class="small nowrap" data-label="Schedule">
+            {{$tz := or $job.Schedule.Timezone "UTC"}}
+            {{if $job.Schedule.Cron}}<span class="mono">{{$job.Schedule.Cron}}</span> {{$tz}}
+            {{else}}Every {{$job.Schedule.Every}}{{if $job.Schedule.At}} at {{$job.Schedule.At}} {{$tz}}{{end}}{{end}}
             {{$next := index $.Data.NextRuns $job.Name}}
-            {{if not $next.IsZero}}<div class="dim">next {{datetime $next}}</div>{{end}}
+            <div class="dim">{{if not $next.IsZero}}Next: {{datetimeAt $next}}{{else}}Not scheduled{{end}}</div>
           </td>
-          <td>
-            {{if $job.Retention.DeleteAfterArchive}}
-              <form method="post" action="/configs/{{.ID}}/deletion" data-confirm="Stop deleting documents for {{$job.Name}}? Archives will still be written.">
+          <td class="small cfg-dests" data-label="Destinations">
+            {{range $job.Destinations}}<div>{{.}}</div>{{else}}<span class="dim">None</span>{{end}}
+            {{if and $deletes (eq (len $job.Destinations) 1)}}<div class="cfg-one-copy" title="Deletes from the source but keeps only one copy">Only copy</div>{{end}}
+          </td>
+          <td class="nowrap cfg-deletion" data-label="After archiving"><span class="state-pair">
+            {{if $deletes}}
+              <span class="badge warn">deletes from {{if $job.Source.IsPostgres}}PostgreSQL{{else}}MongoDB{{end}}</span>
+              <form method="post" action="/configs/{{.ID}}/deletion" class="inline-form" data-confirm="Stop deleting documents for {{$job.Name}}? Archives will still be written.">
                 <input type="hidden" name="csrf" value="{{$.CSRF}}">
                 <input type="hidden" name="deleteAfterArchive" value="false">
-                <button class="btn small" type="submit" title="Click to turn deletion off"><span class="badge warn">deletes</span></button>
+                <button class="btn link small" type="submit" aria-label="Deletion on for {{$job.Name}}. Turn off deletion">Turn off</button>
               </form>
             {{else}}
-              <form method="post" action="/configs/{{.ID}}/deletion" data-confirm="Turn deletion ON for {{$job.Name}}? Documents matching its filter will be removed from MongoDB after every copy is stored and verified.">
+              <span class="badge muted">keeps in {{if $job.Source.IsPostgres}}PostgreSQL{{else}}MongoDB{{end}}</span>
+              <form method="post" action="/configs/{{.ID}}/deletion" class="inline-form" data-confirm="Turn on deletion for {{$job.Name}}? From its next run, records matching its filter ({{$job.Source.Database}}.{{$job.Source.Collection}} on {{$job.Source.Account}}) are removed from {{if $job.Source.IsPostgres}}PostgreSQL{{else}}MongoDB{{end}} after every copy is stored and verified. If you haven't yet, open the config and use Count matches and Dry run first.">
                 <input type="hidden" name="csrf" value="{{$.CSRF}}">
                 <input type="hidden" name="deleteAfterArchive" value="true">
-                <button class="btn small" type="submit" title="Click to turn deletion on"><span class="badge muted">keeps</span></button>
+                <button class="btn link small arms" type="submit" aria-label="Deletion off for {{$job.Name}}. Turn on deletion…">Turn on deletion…</button>
               </form>
             {{end}}
-          </td>
-          <td class="small nowrap">
+          </span></td>
+          <td class="small nowrap" data-label="Last run">
             {{if $last.StartedAt.IsZero}}
-              <span class="dim">never</span>
+              <span class="dim">Never</span>
             {{else}}
-              <span class="badge {{statusTone $last.Status}}">{{$last.Status}}</span>
-              <div class="dim">{{since $last.StartedAt}}</div>
+              {{if eq (print $last.Status) "dry_run"}}<span class="badge muted">dry run</span>{{else}}<span class="badge {{statusTone $last.Status}}">{{$last.Status}}</span>{{end}} <span class="dim">{{since $last.StartedAt}}</span>
               <div class="dim">{{number $last.DocsArchived}} archived{{if $last.DocsDeleted}}, {{number $last.DocsDeleted}} deleted{{end}}</div>
             {{end}}
           </td>
           <td class="actions">
-            <form method="post" action="/configs/{{.ID}}/run">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="dryRun" value="1">
-              <button class="btn small" type="submit" {{if $running}}disabled{{end}}>Dry run</button>
-            </form>
-            <form method="post" action="/configs/{{.ID}}/run" data-confirm="{{if $job.Retention.DeleteAfterArchive}}Run {{$job.Name}} now? Matching documents will be archived and then DELETED from MongoDB.{{else}}Run {{$job.Name}} now?{{end}}">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <button class="btn small primary" type="submit" {{if $running}}disabled{{end}}>Run</button>
-            </form>
-            <a class="btn small" href="/configs/{{.ID}}">Edit</a>
+            {{if $running}}
+              <span class="badge busy">running</span>
+            {{else}}
+              {{if $dryFirst}}
+              <form method="post" action="/configs/{{.ID}}/run">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                <input type="hidden" name="dryRun" value="1">
+                <button class="btn small cfg-run" type="submit">{{template "icon-flask"}}<span class="label-collapse">Dry run</span><span class="visually-hidden"> {{$job.Name}}</span></button>
+              </form>
+              {{else}}
+              <form method="post" action="/configs/{{.ID}}/run" data-confirm="Run {{$job.Name}} now?">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                <button class="btn small cfg-run" type="submit">{{template "icon-play"}}<span class="label-collapse">Run</span><span class="visually-hidden"> {{$job.Name}}</span></button>
+              </form>
+              {{end}}
+            {{end}}
+            <details class="row-menu">
+              <summary class="btn small ghost icon-only" aria-label="More actions for {{$job.Name}}" title="More actions">{{template "icon-more"}}</summary>
+              <div class="menu" role="menu">
+                <a class="menu-item" href="/configs/{{.ID}}" role="menuitem">{{template "icon-pencil"}}Edit</a>
+                {{if not $running}}
+                {{if $dryFirst}}
+                <form method="post" action="/configs/{{.ID}}/run" data-confirm="{{if $deletes}}Run {{$job.Name}} now? Matching records will be archived and then DELETED from {{if $job.Source.IsPostgres}}PostgreSQL{{else}}MongoDB{{end}}.{{else}}Run {{$job.Name}} now? It has never run — a dry run first shows what it selects.{{end}}">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <button class="menu-item{{if $deletes}} danger{{end}}" type="submit" role="menuitem">{{template "icon-play"}}{{if $deletes}}Run now (deletes){{else}}Run now{{end}}</button>
+                </form>
+                {{else}}
+                <form method="post" action="/configs/{{.ID}}/run">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <input type="hidden" name="dryRun" value="1">
+                  <button class="menu-item" type="submit" role="menuitem">{{template "icon-flask"}}Dry run</button>
+                </form>
+                {{end}}
+                {{end}}
+                <div class="menu-sep" role="separator"></div>
+                <form method="post" action="/configs/{{.ID}}/delete" data-confirm="Remove the config {{$job.Name}}? Its archives and run history are kept.">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <button class="menu-item danger" type="submit" role="menuitem">{{template "icon-trash"}}Remove</button>
+                </form>
+              </div>
+            </details>
           </td>
         </tr>
       {{end}}
@@ -89,10 +124,12 @@
   </div>
   {{else}}
   <div class="empty">
+    <span class="empty-icon">{{template "icon-clock"}}</span>
     <h3>No retention configs yet</h3>
-    <p>A config decides what to archive, where the copies go, how often, and whether the originals are then deleted from MongoDB.</p>
-    <a class="btn primary" href="/configs/new">Create the first config</a>
+    <p>A config decides what to archive, where the copies go, how often, and whether the originals are then deleted from the source.</p>
+    <a class="btn primary" href="/configs/new">{{template "icon-plus"}} New config</a>
   </div>
   {{end}}
+</div>
 </div>
 {{end}}

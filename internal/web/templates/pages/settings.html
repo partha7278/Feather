@@ -2,7 +2,7 @@
 <div class="page-head">
   <div>
     <h1>Settings</h1>
-    <p>Administrators, process settings, and where feather keeps its own data.</p>
+    <p>Administrators, process settings, and where Feather keeps its own data.</p>
   </div>
 </div>
 
@@ -13,39 +13,39 @@
       <input type="hidden" name="csrf" value="{{.CSRF}}">
       <div class="field">
         <label for="instanceName">Instance name</label>
-        <input type="text" id="instanceName" name="instanceName" value="{{.Data.InstanceName}}" placeholder="optional — e.g. production">
-        <p class="hint">Shown in logs. Useful when more than one feather is running.</p>
+        <input type="text" id="instanceName" name="instanceName" value="{{.Data.InstanceName}}" placeholder="Optional — e.g. production" aria-describedby="instanceName-hint">
+        <p class="hint" id="instanceName-hint">Shown in logs. Useful when more than one Feather is running.</p>
       </div>
       <div class="field">
         <label for="maxConcurrent">Concurrent jobs</label>
-        <input type="number" id="maxConcurrent" name="maxConcurrent" value="{{.Data.MaxConcurrent}}" min="1" max="16">
-        <p class="hint">How many retention jobs may archive at the same time. Takes effect at the next restart.</p>
+        <input type="number" id="maxConcurrent" name="maxConcurrent" value="{{.Data.MaxConcurrent}}" min="1" max="16" aria-describedby="maxConcurrent-hint">
+        <p class="hint" id="maxConcurrent-hint">How many retention jobs may archive at the same time. Takes effect at the next restart.</p>
       </div>
       <div class="field">
         <label for="webhookURL">Notification webhook</label>
         <input type="url" id="webhookURL" name="webhookURL" value="{{.Data.WebhookURL}}"
                placeholder="https://hooks.example.com/…" aria-describedby="webhookHint">
         <p class="hint" id="webhookHint">
-          A JSON POST when a run fails. Left blank, feather tells nobody — and the only way
+          A JSON POST when a run fails. Left blank, Feather tells nobody — and the only way
           to notice a config that has been failing every night is to open the runs page.
           Dry runs never notify.
         </p>
       </div>
       <div class="field checkbox">
         <label>
-          <input type="checkbox" name="notifyOnSuccess" value="true" {{if .Data.NotifyOnSuccess}}checked{{end}}>
+          <input type="checkbox" name="notifyOnSuccess" value="true" {{if .Data.NotifyOnSuccess}}checked{{end}} aria-describedby="notifyOnSuccess-hint">
           Notify on success as well
         </label>
-        <p class="hint">Off by default. Turn it on if you would rather have a heartbeat than silence.</p>
+        <p class="hint" id="notifyOnSuccess-hint">Off by default. Turn it on if you would rather have a heartbeat than silence.</p>
       </div>
       <button class="btn primary" type="submit">Save</button>
     </form>
   </div>
 
-  <div class="card">
+  <div class="card settings-storage">
     <h2>Storage</h2>
-    <p class="hint">Everything feather knows lives in one SQLite file. Back it up together with the master key.</p>
-    <dl class="kv">
+    <p class="hint">Everything Feather knows lives in one SQLite file. Back it up together with the master key.</p>
+    <dl class="kv settings-paths">
       <dt>Database</dt><dd class="mono small break">{{.Data.DatabasePath}}</dd>
       <dt>Spool directory</dt><dd class="mono small break">{{.Data.SpoolDir}}</dd>
       <dt>Master key</dt>
@@ -54,72 +54,126 @@
       </dd>
       <dt>Host</dt><dd class="mono small">{{.Data.Host}}</dd>
     </dl>
-    <div class="notice" style="margin-top:14px">
+    <div class="notice">
       <strong>Keep the master key with your backups</strong>
       MongoDB connection strings and cloud secrets are encrypted with it. Without the key, a copy of the database cannot be used.
     </div>
+    <form method="post" action="/settings/master-key" autocomplete="off" class="divided settings-master">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <div class="field">
+        <label for="masterKeyPassword">Your password</label>
+        <input type="password" id="masterKeyPassword" name="password" required autocomplete="current-password"
+               aria-describedby="masterKeyHint">
+        <p class="hint" id="masterKeyHint">
+          Asked again because the key together with a copy of the database opens every stored credential.
+          The download is recorded in the audit log.
+        </p>
+      </div>
+      <button class="btn" type="submit">Download master key</button>
+    </form>
   </div>
 </div>
 
-<div class="card">
+<div class="card settings-db-backups">
   <div class="card-head">
     <div>
-      <h2>Backup</h2>
+      <h2>Database backups</h2>
       <p class="hint">
-        A consistent snapshot of feather's whole database — the archive catalogue, the
-        administrator logins and the sealed credentials — taken while feather keeps running.
-        This is what you restore from after losing the server. Copying the database file
-        instead is not safe: it is written ahead of itself, so a plain copy captures a
-        half-finished state.
+        One consistent snapshot of Feather's own database a day, taken while it keeps running.
+        The newest ones are kept and older ones removed. Each needs the master key to be read.
       </p>
     </div>
+    {{if .Data.SelfBackup.Enabled}}
+    <div class="row-buttons">
+      <form method="post" action="/settings/db-backups/run">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="btn" type="submit">Back up now</button>
+      </form>
+    </div>
+    {{end}}
   </div>
 
-  <form method="post" action="/settings/backup">
+  <form method="post" action="/settings/db-backups">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <div class="field">
-      <label for="backupPath">Write to</label>
-      <input type="text" id="backupPath" name="path" placeholder="{{.Data.DataDir}}/feather-backup-….db"
-             aria-describedby="backupPathHint">
-      <p class="hint" id="backupPathHint">
-        A full path on the server. Left blank, feather names one with today's date beside the
-        database. An existing file is never overwritten.
-      </p>
+    <div class="row">
+      <div class="field">
+        <label for="selfBackupKeep">Backups to keep</label>
+        <input type="number" id="selfBackupKeep" name="selfBackupKeep" value="{{.Data.SelfBackup.Keep}}"
+               min="0" max="{{.Data.SelfBackupMax}}" aria-describedby="selfBackupKeep-hint">
+        <p class="hint" id="selfBackupKeep-hint">
+          One per day — 10 keeps the last 10 days. 0 turns automatic backups off; existing files are left alone.
+        </p>
+      </div>
+      <div class="field">
+        <label for="selfBackupDir">Backup directory</label>
+        <input type="text" id="selfBackupDir" name="selfBackupDir"
+               value="{{if ne .Data.SelfBackup.Dir .Data.SelfBackup.DefaultDir}}{{.Data.SelfBackup.Dir}}{{end}}"
+               placeholder="{{.Data.SelfBackup.DefaultDir}}" aria-describedby="selfBackupDir-hint">
+        <p class="hint" id="selfBackupDir-hint">
+          An absolute path. Blank uses the default beside the database — a separate disk or mount is better.
+        </p>
+      </div>
     </div>
-    <button type="submit" class="btn">Write a backup</button>
+    <button class="btn primary" type="submit">Save</button>
   </form>
 
-  <p class="hint warn">
-    The backup needs the master key at <code>{{.Data.MasterKeyPath}}</code> to be read.
-    Keep a copy of that key wherever you keep the backup — without it the file cannot be opened,
-    and neither can the archives it points to.
-  </p>
+  {{if .Data.SelfBackupError}}
+  <div class="notice">
+    <strong>The backup directory could not be read</strong>
+    {{.Data.SelfBackupError}}
+  </div>
+  {{else if .Data.SelfBackups}}
+  <div class="table-wrap mid divided" tabindex="0" role="region" aria-label="Database backups">
+    <table>
+      <thead><tr><th scope="col">Day</th><th scope="col">File</th><th scope="col">Size</th></tr></thead>
+      <tbody>
+      {{range .Data.SelfBackups}}
+        <tr>
+          <td class="first">{{.Day.Format "Mon 2 Jan 2006"}}</td>
+          <td class="mono small break">{{.Path}}</td>
+          <td class="small dim">{{bytes .Size}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else if .Data.SelfBackup.Enabled}}
+  <p class="hint divided">No backups yet in {{.Data.SelfBackup.Dir}}.</p>
+  {{end}}
 </div>
 
-<div class="card">
+<div class="card settings-bundle">
   <div class="card-head">
     <div>
       <h2>Export &amp; import</h2>
       <p class="hint">
-        Every MongoDB account, every destination, every retention config and the settings above,
-        as one file. This is for moving an installation to another server — it deliberately does
-        not carry the archive catalogue or the administrator logins, so it is not a backup.
+        MongoDB accounts, destinations, retention configs, run history and the settings above, as one
+        file — choose which. Administrator logins never travel in it.
       </p>
+    </div>
+    <div class="row-buttons" data-dialog-buttons hidden>
+      <button class="btn" type="button" data-dialog-open="importDialog">Import…</button>
+      <button class="btn" type="button" data-dialog-open="exportDialog">Export…</button>
     </div>
   </div>
 
-  <div class="grid two">
-    <div>
-      <h3>Export</h3>
-      <form method="post" action="/settings/export">
+  <div class="grid two modal-host">
+    <dialog class="modal" id="exportDialog" aria-labelledby="exportDialogTitle">
+      <div class="modal-head">
+        <h3 id="exportDialogTitle">Export</h3>
+        <button class="btn ghost icon-only" type="button" data-dialog-close aria-label="Close" hidden>&times;</button>
+      </div>
+      <form method="post" action="/settings/export" data-dialog-download>
         <input type="hidden" name="csrf" value="{{.CSRF}}">
+        {{template "bundle-sections" "export"}}
         <div class="field">
           <label for="exportPassphrase">Passphrase</label>
-          <input type="password" id="exportPassphrase" name="passphrase" minlength="{{.Data.MinPassphrase}}" autocomplete="new-password">
-          <p class="hint">
+          <input type="password" id="exportPassphrase" name="passphrase" minlength="{{.Data.MinPassphrase}}" autocomplete="new-password" aria-describedby="exportPassphrase-hint">
+          <p class="hint" id="exportPassphrase-hint">
             At least {{.Data.MinPassphrase}} characters. Connection strings and cloud secrets are
             re-sealed under it, so the file is safe to keep off this machine — and useless without
-            the passphrase. Store it somewhere you will still have it.
+            the passphrase. Store it somewhere you will still have it. Not needed when exporting
+            neither accounts nor destinations.
           </p>
         </div>
         <div class="field">
@@ -130,48 +184,57 @@
           <input type="checkbox" id="withoutSecrets" name="withoutSecrets" value="true">
           <label for="withoutSecrets">
             Export without credentials
-            <span class="hint" style="display:block">
-              Accounts, destinations and retention rules only — no passphrase needed, and nothing
+            <span class="hint">
+              Leaves out connection strings and cloud secrets — no passphrase needed, and nothing
               secret in the file. Importing it can add configs and refresh accounts that already
               exist, but not create an account it has no credentials for.
             </span>
           </label>
         </div>
-        <button class="btn primary" type="submit">Download bundle</button>
+        <div class="modal-actions">
+          <button class="btn" type="button" data-dialog-close hidden>Cancel</button>
+          <button class="btn primary" type="submit">Download bundle</button>
+        </div>
       </form>
-    </div>
+    </dialog>
 
-    <div>
-      <h3>Import</h3>
+    <dialog class="modal" id="importDialog" aria-labelledby="importDialogTitle">
+      <div class="modal-head">
+        <h3 id="importDialogTitle">Import</h3>
+        <button class="btn ghost icon-only" type="button" data-dialog-close aria-label="Close" hidden>&times;</button>
+      </div>
       <form method="post" action="/settings/import" enctype="multipart/form-data"
-            data-confirm="Import this bundle into {{if .Data.InstanceName}}{{.Data.InstanceName}}{{else}}this feather{{end}}?">
+            data-confirm="Import this bundle into {{if .Data.InstanceName}}{{.Data.InstanceName}}{{else}}this Feather{{end}}? Imported retention configs are live immediately — including any that delete from MongoDB. Review Retention configs before their next scheduled run.">
         <input type="hidden" name="csrf" value="{{.CSRF}}">
         <div class="field">
           <label for="bundle">Bundle file</label>
           <input type="file" id="bundle" name="bundle" accept=".json,application/json" required>
         </div>
+        {{template "bundle-sections" "import"}}
         <div class="field">
           <label for="importPassphrase">Passphrase</label>
-          <input type="password" id="importPassphrase" name="passphrase" autocomplete="off">
-          <p class="hint">The one the bundle was exported with. Leave empty for a bundle exported without credentials.</p>
+          <input type="password" id="importPassphrase" name="passphrase" autocomplete="off" aria-describedby="importPassphrase-hint">
+          <p class="hint" id="importPassphrase-hint">
+            The one the bundle was exported with. Leave empty for a bundle exported without
+            credentials, or when importing neither accounts nor destinations.
+          </p>
         </div>
         <div class="field inline">
           <input type="checkbox" id="overwrite" name="overwrite" value="true">
           <label for="overwrite">
             Replace entries that already exist
-            <span class="hint" style="display:block">
+            <span class="hint">
               Off, the import only adds what is missing and leaves everything here untouched, so
               running it twice changes nothing the second time.
             </span>
           </label>
         </div>
-        <div class="field inline">
-          <input type="checkbox" id="importSettings" name="importSettings" value="true" checked>
-          <label for="importSettings">Apply the instance name and concurrency cap from the bundle</label>
+        <div class="modal-actions">
+          <button class="btn" type="button" data-dialog-close hidden>Cancel</button>
+          <button class="btn primary" type="submit">Import bundle</button>
         </div>
-        <button class="btn" type="submit">Import bundle</button>
       </form>
-    </div>
+    </dialog>
   </div>
 
   <div class="notice">
@@ -181,7 +244,7 @@
   </div>
 </div>
 
-<div class="card">
+<div class="card settings-password">
   <h2>Change your password</h2>
   <form method="post" action="/settings/password" autocomplete="off">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -203,25 +266,25 @@
   </form>
 </div>
 
-<div class="card">
+<div class="card settings-admins">
   <div class="card-head">
-    <div><h2>Administrators</h2><p class="hint">Everyone here can change retention rules, including whether data is deleted.</p></div>
+    <div><h2>Administrators</h2><p class="hint">Everyone here can change retention configs, including whether data is deleted.</p></div>
   </div>
 
-  <div class="table-wrap" style="margin-bottom:18px">
+  <div class="table-wrap mid" tabindex="0" role="region" aria-label="Administrators">
     <table>
-      <thead><tr><th>Email</th><th>Added</th><th>Last signed in</th><th></th></tr></thead>
+      <thead><tr><th scope="col">Email</th><th scope="col">Added</th><th scope="col">Last signed in</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
       <tbody>
       {{range .Data.Admins}}
         <tr>
-          <td>{{.Email}}{{if eq .ID $.User.ID}} <span class="badge muted">you</span>{{end}}</td>
+          <td class="first">{{.Email}}{{if eq .ID $.User.ID}} <span class="badge muted">you</span>{{end}}</td>
           <td class="small dim">{{datetime .CreatedAt}}</td>
           <td class="small dim">{{since .LastLoginAt}}</td>
           <td class="actions">
             {{if ne .ID $.User.ID}}
             <form method="post" action="/settings/admins/{{.ID}}/delete" data-confirm="Remove {{.Email}}?">
               <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <button class="btn small danger" type="submit">Remove</button>
+              <button class="btn small ghost danger" type="submit">Remove</button>
             </form>
             {{end}}
           </td>
@@ -231,7 +294,7 @@
     </table>
   </div>
 
-  <form method="post" action="/settings/admins" autocomplete="off">
+  <form method="post" action="/settings/admins" autocomplete="off" class="settings-subform" aria-label="Add an administrator">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <div class="row">
       <div class="field">
@@ -240,11 +303,50 @@
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input type="password" id="password" name="password" required minlength="{{.Data.MinPassword}}" autocomplete="new-password">
-        <p class="hint">At least {{.Data.MinPassword}} characters. Share it with them out of band and have them change it.</p>
+        <input type="password" id="password" name="password" required minlength="{{.Data.MinPassword}}" autocomplete="new-password" aria-describedby="adminPassword-hint">
+        <p class="hint" id="adminPassword-hint">At least {{.Data.MinPassword}} characters. Share it with them out of band and have them change it.</p>
       </div>
     </div>
-    <button class="btn" type="submit">Add administrator</button>
+    <button class="btn primary" type="submit">Add administrator</button>
   </form>
 </div>
+{{end}}
+
+{{define "bundle-sections"}}
+<fieldset class="field choices bundle-include">
+  <legend>Include</legend>
+  <div class="field inline">
+    <input type="checkbox" id="{{.}}MongoSources" name="include" value="mongoSources" checked>
+    <label for="{{.}}MongoSources">MongoDB accounts</label>
+  </div>
+  <div class="field inline">
+    <input type="checkbox" id="{{.}}PostgresSources" name="include" value="postgresSources" checked>
+    <label for="{{.}}PostgresSources">PostgreSQL accounts</label>
+  </div>
+  <div class="field inline">
+    <input type="checkbox" id="{{.}}Destinations" name="include" value="destinations" checked>
+    <label for="{{.}}Destinations">Destinations</label>
+  </div>
+  <div class="field inline">
+    <input type="checkbox" id="{{.}}Configs" name="include" value="configs" checked>
+    <label for="{{.}}Configs">Retention configs</label>
+  </div>
+  <div class="field inline">
+    <input type="checkbox" id="{{.}}Runs" name="include" value="runs" checked>
+    <label for="{{.}}Runs">
+      Run history and archive catalogue
+      <span class="hint">
+        Every finished run and the record of the files it wrote, so run history, the backups
+        list and restores carry over. The archive files themselves stay in their destinations.
+      </span>
+    </label>
+  </div>
+  <div class="field inline">
+    <input type="checkbox" id="{{.}}Settings" name="include" value="settings" checked>
+    <label for="{{.}}Settings">
+      Instance settings
+      <span class="hint">The instance name and concurrency cap.</span>
+    </label>
+  </div>
+</fieldset>
 {{end}}

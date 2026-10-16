@@ -30,6 +30,8 @@ const (
 
 	AuditSourceSaved       = "mongo_source.saved"
 	AuditSourceDeleted     = "mongo_source.deleted"
+	AuditPostgresSaved     = "postgres_source.saved"
+	AuditPostgresDeleted   = "postgres_source.deleted"
 	AuditDestSaved         = "destination.saved"
 	AuditDestDeleted       = "destination.deleted"
 	AuditDriveConnected    = "destination.drive_connected"
@@ -40,6 +42,15 @@ const (
 	// eventually asks.
 	AuditArchiveDownloaded = "archive.downloaded"
 	AuditDatabaseBackedUp  = "settings.backup_taken"
+
+	// Putting documents back. An import that only adds what is missing is
+	// recorded like any other change; one that overwrites documents by _id has
+	// its own action so it can be marked destructive and filtered for.
+	AuditImportStarted        = "archive.import_started"
+	AuditImportReplaceStarted = "archive.import_replace_started"
+	AuditImportFinished       = "archive.import_finished"
+	// Whoever holds the key and a copy of the database holds every credential.
+	AuditMasterKeyDownloaded = "settings.master_key_downloaded"
 
 	AuditSettingsSaved  = "settings.saved"
 	AuditBundleExported = "settings.bundle_exported"
@@ -62,8 +73,8 @@ type AuditEvent struct {
 // so the UI can mark it. These are the rows an operator scans for first.
 func (e AuditEvent) Destructive() bool {
 	switch e.Action {
-	case AuditDeletionEnabled, AuditConfigDeleted, AuditSourceDeleted,
-		AuditDestDeleted, AuditAdminDeleted, AuditBundleImported:
+	case AuditDeletionEnabled, AuditConfigDeleted, AuditSourceDeleted, AuditPostgresDeleted,
+		AuditDestDeleted, AuditAdminDeleted, AuditBundleImported, AuditImportReplaceStarted:
 		return true
 	}
 	return false

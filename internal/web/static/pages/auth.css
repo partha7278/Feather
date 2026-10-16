@@ -1,0 +1,143 @@
+/* Login, setup, error and settings pages — page-only styles. Shared components live in /static/app.css. */
+
+/* === Signed-out pages (login, setup, error) =============================== */
+
+/* The brand sits above the card as a small centred lock-up. */
+.centred .brand {
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 0 24px;
+  text-align: center;
+}
+.centred .brand .logo { width: 40px; height: 40px; border-radius: 10px; box-shadow: var(--shadow-xs); }
+.centred .brand .brand-text { display: flex; flex-direction: column; align-items: center; gap: 0; font-size: 16px; line-height: 24px; }
+.centred .brand .brand-text small { font-size: 12px; line-height: 16px; }
+
+.centred .card.auth-card { padding: 32px; margin-bottom: 0; }
+.auth-head { margin: 0 0 24px; }
+.centred .auth-head h2 { margin: 0 0 4px; }
+.auth-head p.hint { margin: 0; font-size: 13px; line-height: 20px; }
+.auth-step {
+  display: block;
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brand);
+}
+
+.auth-form .field { margin-bottom: 16px; }
+.auth-form .btn.block { margin-top: 24px; }
+
+/* The setup note reads as part of the card's footer, not a warning. */
+.centred .card .notice.auth-note { margin: 24px 0 0; background: var(--surface-2); border-color: var(--border-soft); }
+
+/* Flash (e.g. a wrong password) sits between the brand and the card. */
+.centred-inner > .flash { margin: 0 0 16px; }
+
+.centred-inner > p.auth-foot { text-wrap: balance; margin: 20px 8px 0; font-size: 12px; line-height: 20px; color: var(--text-faint); }
+.auth-foot code { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+
+@media (max-width: 480px) {
+  .centred { align-items: flex-start; padding: 32px 16px; }
+  .centred .card.auth-card { padding: 24px 20px; }
+}
+
+/* === Error page =========================================================== */
+
+.error-card { text-align: left; }
+/* The error card is wider than the sign-in card (560 vs 400). */
+.centred-inner:has(> .error-card) { max-width: 560px; }
+.centred .error-card, .main .error-card { max-width: 560px; margin: 48px auto 0; padding: 32px; }
+.centred .error-card { margin-top: 0; }
+.error-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin: 0 0 16px;
+  border: 1px solid var(--bad-line);
+  border-radius: var(--radius);
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+.error-mark svg { width: 20px; height: 20px; }
+.error-card h2, .centred .error-card h2 { margin: 0 0 8px; font-size: 20px; line-height: 28px; letter-spacing: -0.02em; }
+.error-message { margin: 0 0 24px; font-size: 14px; line-height: 1.6; color: var(--text-dim); }
+.error-card pre.error-detail { margin: -8px 0 24px; font-size: 12px; white-space: pre-wrap; overflow-wrap: break-word; }
+
+@media (max-width: 480px) {
+  .centred .error-card, .main .error-card { padding: 24px 20px; margin-top: 16px; }
+  .error-card .button-row .btn { flex: 1 1 auto; justify-content: center; }
+}
+
+/* === Settings ============================================================= */
+
+/* Storage: label above, path below in a quiet mono well, so a long path
+   wraps over the full card width rather than inside a narrow column. */
+.kv.settings-paths { grid-template-columns: 1fr; gap: 0; margin: 0 0 20px; }
+.kv.settings-paths dt { margin: 0 0 4px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-faint); }
+.kv.settings-paths dd {
+  margin: 0 0 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+.kv.settings-paths dd:last-of-type { margin-bottom: 0; }
+
+/* Master key: the notice and the download form read as one guarded block. */
+.settings-storage > .notice { margin: 0; border-color: var(--warn-line); border-bottom: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0; background: var(--warn-soft); }
+.card.settings-storage > form.settings-master {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--warn-line);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--surface);
+}
+.settings-master .field { margin-bottom: 12px; }
+
+/* Forms that close a card get a clear seam above them. */
+.card form.settings-subform { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+/* Under the admin table the table's own bottom rule is the seam. */
+.settings-admins form.settings-subform { margin-top: 0; padding-top: 0; border-top: 0; }
+.settings-admins form.settings-subform[aria-label]::before {
+  content: attr(aria-label);
+  display: block;
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.settings-admins td { white-space: nowrap; }
+
+/* Change-password: three fields then the button, on one baseline on desktop. */
+.settings-password .row { margin-bottom: 4px; }
+
+/* Export & import card: the import warning reads as a footnote. */
+.settings-bundle > .card-head { margin-bottom: 12px; }
+.card.settings-bundle > .notice:last-child { margin: 0; }
+
+/* --- popup forms (Export / Import): shared dialog styles live in app.css --- */
+.settings-bundle dialog.modal { width: min(560px, calc(100vw - 32px)); }
+
+@media (max-width: 860px) {
+  .card.settings-storage > form.settings-master { padding: 12px; }
+}
+@media (max-width: 600px) {
+  .settings-bundle > .card-head { flex-direction: column; align-items: stretch; }
+  .settings-bundle > .card-head > .row-buttons .btn { flex: 1 1 0; justify-content: center; }
+}
+
+/* Inline emphasis inside a notice (setup's "Settings → Storage"), not a title line. */
+.notice.auth-note strong.inline { display: inline; margin: 0; font-weight: 600; color: var(--text); }

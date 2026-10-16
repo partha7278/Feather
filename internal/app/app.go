@@ -18,6 +18,7 @@ import (
 	"github.com/unifers/feather/internal/dest"
 	"github.com/unifers/feather/internal/mongox"
 	"github.com/unifers/feather/internal/notify"
+	"github.com/unifers/feather/internal/pgsrc"
 	"github.com/unifers/feather/internal/runner"
 	"github.com/unifers/feather/internal/scheduler"
 	"github.com/unifers/feather/internal/secrets"
@@ -30,6 +31,7 @@ type App struct {
 	Log       *slog.Logger
 	Store     *store.Store
 	Mongo     *mongox.Pool
+	Postgres  *pgsrc.Pool
 	Registry  *dest.Registry
 	Runner    *runner.Runner
 	Scheduler *scheduler.Scheduler
@@ -49,6 +51,14 @@ type App struct {
 
 	mu      sync.Mutex
 	running map[string]time.Time
+
+	// importing is set while an import is in flight. Guarded by mu; see
+	// StartImport for why there is only ever one.
+	importing bool
+
+	// selfBackupMu keeps the hourly check and a "Back up now" click from
+	// writing the same day's snapshot at once.
+	selfBackupMu sync.Mutex
 }
 
 // Open connects the database, unseals the credentials in it, and builds the
@@ -88,6 +98,11 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 		st.Close()
 		return nil, err
 	}
+	pgSources, err := st.PostgresSourceMap(ctx)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
 	destinations, err := st.DestinationMap(ctx)
 	if err != nil {
 		st.Close()
@@ -95,6 +110,7 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 	}
 
 	a.Mongo = mongox.NewPool(sources)
+	a.Postgres = pgsrc.NewPool(pgSources)
 	registry, err := dest.NewRegistry(ctx, destinations)
 	if err != nil {
 		st.Close()
@@ -102,6 +118,7 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 	}
 	a.Registry = registry
 	a.Runner = runner.New(env, a.Mongo, st, registry, log)
+	a.Runner.UsePostgres(a.Postgres)
 
 	jobs, err := st.Jobs(ctx)
 	if err != nil {
@@ -142,6 +159,7 @@ func Open(ctx context.Context, env *config.Env, log *slog.Logger) (*App, error) 
 		"database", st.Path(),
 		"master_key", box.Source,
 		"mongo_accounts", len(sources),
+		"postgres_accounts", len(pgSources),
 		"destinations", len(destinations),
 		"configs", len(jobs))
 	return a, nil
@@ -162,6 +180,10 @@ func (a *App) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	pgSources, err := a.Store.PostgresSourceMap(ctx)
+	if err != nil {
+		return err
+	}
 	destinations, err := a.Store.DestinationMap(ctx)
 	if err != nil {
 		return err
@@ -175,6 +197,7 @@ func (a *App) Reload(ctx context.Context) error {
 		return err
 	}
 	a.Mongo.Replace(ctx, sources)
+	a.Postgres.Replace(pgSources)
 	if err := a.Scheduler.Reload(a.baseCtx, jobs); err != nil {
 		return err
 	}
@@ -184,7 +207,8 @@ func (a *App) Reload(ctx context.Context) error {
 	}
 
 	a.Log.Info("configuration reloaded",
-		"mongo_accounts", len(sources), "destinations", len(destinations), "configs", len(jobs))
+		"mongo_accounts", len(sources), "postgres_accounts", len(pgSources),
+		"destinations", len(destinations), "configs", len(jobs))
 	return nil
 }
 
@@ -274,6 +298,9 @@ func (a *App) Drain(ctx context.Context) bool {
 		for name := range a.running {
 			names = append(names, name)
 		}
+		if a.importing {
+			names = append(names, "(an import)")
+		}
 		a.mu.Unlock()
 		a.Log.Warn("gave up waiting for in-flight runs", "configs", names)
 		return false
@@ -295,6 +322,13 @@ func (a *App) Housekeeping(ctx context.Context) {
 		a.Log.Warn("could not close stale run rows", "error", err)
 	} else if failed > 0 {
 		a.Log.Warn("closed run rows left open by a previous process", "count", failed)
+	}
+	// Imports hold no lease: nothing outside the process that started one can
+	// be running it, so at startup every open import row is abandoned.
+	if failed, err := a.Store.FailStaleImports(ctx); err != nil {
+		a.Log.Warn("could not close stale import rows", "error", err)
+	} else if failed > 0 {
+		a.Log.Warn("closed import rows left open by a previous process", "count", failed)
 	}
 	a.purge(ctx)
 }
@@ -359,6 +393,9 @@ func (a *App) Close(ctx context.Context) {
 	if a.Mongo != nil {
 		a.Mongo.Close(shutdownCtx)
 	}
+	if a.Postgres != nil {
+		a.Postgres.Close()
+	}
 	if a.Store != nil {
 		a.Store.Close()
 	}
@@ -376,11 +413,15 @@ func (a *App) Catalog(ctx context.Context) (config.Catalog, error) {
 	if err != nil {
 		return config.Catalog{}, err
 	}
+	pgSources, err := a.Store.PostgresSourceMap(ctx)
+	if err != nil {
+		return config.Catalog{}, err
+	}
 	destinations, err := a.Store.DestinationMap(ctx)
 	if err != nil {
 		return config.Catalog{}, err
 	}
-	return config.Catalog{Sources: sources, Destinations: destinations}, nil
+	return config.Catalog{Sources: sources, PostgresSources: pgSources, Destinations: destinations}, nil
 }
 
 // MaxConcurrentJobs is the effective concurrency cap: the stored setting if

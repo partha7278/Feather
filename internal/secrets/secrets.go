@@ -73,14 +73,7 @@ func Resolve(envValue, path string) (*Box, error) {
 
 	switch data, err := os.ReadFile(path); {
 	case err == nil:
-		key, err := decodeKey(strings.TrimSpace(string(data)))
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if err := checkPermissions(path); err != nil {
-			return nil, err
-		}
-		return New(key, path)
+		return fromKeyFile(path, data)
 	case !os.IsNotExist(err):
 		return nil, fmt.Errorf("reading master key %s: %w", path, err)
 	}
@@ -97,7 +90,18 @@ func Resolve(envValue, path string) (*Box, error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
-			return Resolve("", path)
+			// Another process won the race; read what it wrote. Once only: a
+			// path that exists for O_EXCL but not for reading is a dangling
+			// symlink, and retrying would recurse forever rather than write
+			// through it.
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				if os.IsNotExist(readErr) {
+					return nil, fmt.Errorf("master key %s exists but points at nothing (a dangling symlink?) — refusing to write a new key through it", path)
+				}
+				return nil, fmt.Errorf("reading master key %s: %w", path, readErr)
+			}
+			return fromKeyFile(path, data)
 		}
 		return nil, fmt.Errorf("writing master key %s: %w", path, err)
 	}
@@ -109,6 +113,18 @@ func Resolve(envValue, path string) (*Box, error) {
 		return nil, err
 	}
 	return New(key, path+" (newly generated)")
+}
+
+// fromKeyFile builds a Box from the contents of the key file at path.
+func fromKeyFile(path string, data []byte) (*Box, error) {
+	key, err := decodeKey(strings.TrimSpace(string(data)))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := checkPermissions(path); err != nil {
+		return nil, err
+	}
+	return New(key, path)
 }
 
 // Seal encrypts a secret. An empty input seals to nothing, so "no session

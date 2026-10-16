@@ -1,0 +1,122 @@
+/* MongoDB accounts and destinations (lists and forms) — page-only styles.
+   Shared components live in /static/app.css. This file is linked on every page,
+   so every rule here is scoped to an acct-* class the four templates own. */
+
+/* --- lists ------------------------------------------------------------------ */
+
+/* Rows read top-down: the name, then its meta. Buttons sit on the first line. */
+.acct-table td.first > a + .badge { margin-left: 8px; }
+.acct-table td.first { min-width: 11rem; }
+.acct-table td.first .clamp { max-width: 30ch; }
+
+/* A connection string or endpoint is one line; the full value is in title. */
+.acct-where { min-width: 14rem; max-width: 22rem; }
+.acct-truncate {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acct-where .small { margin-top: 2px; }
+.acct-where .small .mono { font-size: 12px; }
+
+.acct-check { min-width: 12rem; }
+.acct-check .clamp { margin-top: 4px; max-width: 34ch; }
+.acct-check .status-dot + .dim { white-space: nowrap; }
+.acct-check > .dim:not(.clamp) { margin-top: 4px; max-width: 30ch; }
+.acct-used { min-width: 6rem; max-width: 12rem; color: var(--text-dim); }
+
+/* --- forms ------------------------------------------------------------------ */
+
+/* The MongoDB form is short: the header and its one card share one column. */
+.acct-narrow { max-width: 600px; }
+.acct-form .acct-card { padding: 20px 20px 0; }
+
+/* A label with a "Stored" badge beside it. */
+.acct-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.acct-label-row label { margin-bottom: 0; }
+.acct-label-row .badge { flex: none; }
+
+/* The masked connection string that is already stored. */
+.acct-stored {
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.acct-stored .mono { font-size: 12.5px; color: var(--text); }
+
+.acct-advanced { margin: 4px 0 0; padding-top: 12px; }
+.acct-advanced[open] { padding-bottom: 4px; }
+.acct-advanced .row .field:last-child, .acct-advanced .row .field { margin-bottom: 8px; }
+
+/* Save and cancel as the card's footer: a short form needs no sticky bar. */
+.acct-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 20px -20px 0;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--surface-2);
+}
+.acct-card-foot .spacer { flex: 1; }
+
+/* Google Drive access status: the next step, above the form it belongs to. */
+.acct-access {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 20px 24px;
+}
+.acct-access.pending { border-left: 3px solid var(--warn); padding-left: 22px; }
+.acct-access-body { flex: 1 1 360px; min-width: 0; }
+.acct-access h2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 4px; }
+.acct-access h2 .badge { font-weight: 500; }
+.acct-access h2 + p.hint { margin: 0; max-width: 72ch; }
+.acct-access form { margin: 0; flex: none; }
+
+/* "or" between the two ways of signing in to Google. */
+.acct-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.acct-or::before, .acct-or::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.section-body > fieldset.sub-panel:has(+ .acct-or) { margin-bottom: 0; }
+.acct-next { margin-top: 12px; }
+.section-body fieldset.sub-panel > .field:last-child { margin-bottom: 0; }
+
+@media (max-width: 860px) {
+  .acct-access { padding: 16px; }
+  .acct-access.pending { padding-left: 14px; }
+  .acct-access form, .acct-access form .btn { width: 100%; }
+  .acct-narrow { max-width: none; }
+  .acct-form .acct-card { padding: 16px 16px 0; }
+  .acct-card-foot { margin: 16px -16px 0; padding: 12px 16px; }
+  .acct-card-foot > .small { flex-basis: 100%; }
+}
+
+/* At phone width the lists use the shared stacked rows (table.stack in
+   app.css). An empty holding or an unused row is not worth a line. */
+@media (max-width: 860px) {
+  .acct-table td.num:has(.zero), .acct-table td.acct-used:has(.acct-unused) { display: none; }
+  .acct-where, .acct-check, .acct-used { max-width: none; }
+  .acct-check .clamp, .acct-check > .dim:not(.clamp) { max-width: none; }
+}

@@ -21,7 +21,9 @@ import (
 	"github.com/unifers/feather/internal/dest"
 	"github.com/unifers/feather/internal/mongox"
 	"github.com/unifers/feather/internal/notify"
+	"github.com/unifers/feather/internal/pgsrc"
 	"github.com/unifers/feather/internal/retry"
+	"github.com/unifers/feather/internal/source"
 	"github.com/unifers/feather/internal/store"
 )
 
@@ -30,6 +32,7 @@ import (
 type Runner struct {
 	env      *config.Env
 	mongo    *mongox.Pool
+	postgres *pgsrc.Pool
 	store    *store.Store
 	registry *dest.Registry
 	host     string
@@ -44,6 +47,11 @@ type Runner struct {
 	// sourceFor overrides how the collection is resolved. Only tests set it.
 	sourceFor func(context.Context, *config.JobConfig) (mongox.Source, error)
 }
+
+// UsePostgres gives the runner the PostgreSQL accounts. It is separate from
+// New because most of what builds a runner — every test among them — has no
+// use for one.
+func (r *Runner) UsePostgres(pool *pgsrc.Pool) { r.postgres = pool }
 
 // SetNotifier swaps the notification sink. Called at startup and whenever the
 // setting changes, so a corrected webhook takes effect without a restart.
@@ -93,10 +101,11 @@ var ErrLeaseLost = errors.New("this run lost its lease to another process")
 
 // Run executes one retention job end to end.
 //
-// The ordering is the safety property: documents are read, written to a
+// The ordering is the safety property: records are read, written to a
 // compressed local file, uploaded to every destination, verified by reading the
-// stored object back, and only then deleted from Mongo. A failure at any point
-// leaves the source data untouched.
+// stored object back, and only then deleted from the source — MongoDB or
+// PostgreSQL, the same order for both. A failure at any point leaves the source
+// data untouched.
 func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.TriggerKind) (*Outcome, error) {
 	log := r.log.With("config", job.Name, "collection", job.Source.Database+"."+job.Source.Collection)
 
@@ -138,21 +147,7 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 		}
 	}()
 
-	resolvedFilter, err := config.ResolveTimeTokens(job.Source.Filter, time.Now())
-	if err != nil {
-		return &Outcome{Status: store.RunFailed}, fmt.Errorf("resolving filter for %s: %w", job.Name, err)
-	}
-	// The config file's formatting would otherwise put newlines through the log
-	// line and the catalogue row.
-	var compactFilter bytes.Buffer
-	if err := json.Compact(&compactFilter, resolvedFilter); err == nil {
-		resolvedFilter = compactFilter.Bytes()
-	}
-	filter, err := mongox.ParseFilter(resolvedFilter)
-	if err != nil {
-		return &Outcome{Status: store.RunFailed}, err
-	}
-	projection, err := mongox.ParseProjection(job.Source.Projection)
+	q, err := resolveQuery(job, time.Now())
 	if err != nil {
 		return &Outcome{Status: store.RunFailed}, err
 	}
@@ -163,7 +158,7 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 		ConfigSHA256: job.SHA256,
 		Database:     job.Source.Database,
 		Collection:   job.Source.Collection,
-		FilterJSON:   string(resolvedFilter),
+		FilterJSON:   q.text,
 		Trigger:      trigger,
 		Host:         r.host,
 		DryRun:       job.DryRun,
@@ -172,10 +167,10 @@ func (r *Runner) Run(ctx context.Context, job *config.JobConfig, trigger store.T
 		return &Outcome{Status: store.RunFailed}, err
 	}
 	log = log.With("run_id", run.ID)
-	log.Info("run started", "filter", string(resolvedFilter), "dry_run", job.DryRun,
+	log.Info("run started", "engine", job.Source.EngineName(), "filter", q.text, "dry_run", job.DryRun,
 		"destinations", job.Destinations, "delete_after_archive", job.Retention.DeleteAfterArchive)
 
-	outcome, runErr := r.execute(ctx, log, job, run, filter, projection)
+	outcome, runErr := r.execute(ctx, log, job, run, q)
 
 	// A cancelled context says nothing about why. When feather cancelled it
 	// deliberately, say so: "context canceled" in the catalogue against a run
@@ -269,7 +264,7 @@ func (r *Runner) announce(ctx context.Context, job *config.JobConfig, run *store
 	})
 }
 
-func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobConfig, run *store.Run, filter, projection bson.D) (*Outcome, error) {
+func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobConfig, run *store.Run, q *query) (*Outcome, error) {
 	outcome := &Outcome{}
 
 	// The counters are copied out on the way past whatever happens, not only on
@@ -290,16 +285,16 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		return outcome, err
 	}
 
-	source, err := r.source(ctx, job)
+	src, err := r.source(ctx, job, q)
 	if err != nil {
 		return outcome, err
 	}
 
 	// Fence the run at the highest id that matches right now. Everything the
-	// run touches — the count, the cursor, and every delete — uses the fenced
-	// filter, so a document written while the run is working belongs to the
+	// run touches — the count, the cursor, and every delete — is bounded by
+	// the fence, so a record written while the run is working belongs to the
 	// next run rather than being swept up by this one.
-	maxID, found, err := source.MaxID(ctx, filter)
+	found, err := src.Fence(ctx)
 	if err != nil {
 		return outcome, err
 	}
@@ -307,9 +302,8 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		log.Info("documents matched", "count", 0)
 		return outcome, nil
 	}
-	filter = mongox.FenceAtID(filter, maxID)
 
-	matching, err := source.Count(ctx, filter)
+	matching, err := src.Count(ctx)
 	if err != nil {
 		return outcome, fmt.Errorf("counting matching documents: %w", err)
 	}
@@ -326,7 +320,7 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		log.Warn("could not record the matched count", "error", err)
 	}
 
-	cursor, err := source.OpenCursor(ctx, filter, projection, job.Batch.FetchSize, job.Source.TimestampField)
+	cursor, err := src.OpenCursor(ctx, job.Batch.FetchSize)
 	if err != nil {
 		return outcome, err
 	}
@@ -349,7 +343,7 @@ func (r *Runner) execute(ctx context.Context, log *slog.Logger, job *config.JobC
 		}
 
 		seq++
-		err = r.shipBatch(ctx, log, job, run, source, filter, targets, batch, seq)
+		err = r.shipBatch(ctx, log, job, run, src, targets, batch, seq)
 		discardErr := batch.spool.Discard()
 		if err != nil {
 			return outcome, err
@@ -382,7 +376,7 @@ type batch struct {
 
 // fillBatch reads documents into a fresh spool file until a size or count limit
 // is reached. The returned bool reports whether the cursor has more to give.
-func (r *Runner) fillBatch(ctx context.Context, cursor mongox.Stream, job *config.JobConfig, spoolDir string, run *store.Run) (*batch, bool, error) {
+func (r *Runner) fillBatch(ctx context.Context, cursor source.Stream, job *config.JobConfig, spoolDir string, run *store.Run) (*batch, bool, error) {
 	spool, err := archive.NewSpool(spoolDir, job.Name, job.Compression)
 	if err != nil {
 		return nil, false, err
@@ -432,7 +426,7 @@ func (r *Runner) fillBatch(ctx context.Context, cursor mongox.Stream, job *confi
 // shipBatch uploads one spooled file everywhere it belongs, verifies each copy,
 // and deletes the source documents once all copies are confirmed.
 func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.JobConfig, run *store.Run,
-	source mongox.Source, filter bson.D, targets []dest.Destination, b *batch, seq int) error {
+	src source.Source, targets []dest.Destination, b *batch, seq int) error {
 
 	baseKey := config.RenderKey(job.Output.KeyTemplate, config.KeyVars{
 		Database:   job.Source.Database,
@@ -463,7 +457,7 @@ func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.Jo
 				"bucket", target.Info().Bucket, "key", target.Key(baseKey))
 		}
 		if job.Retention.DeleteAfterArchive {
-			log.Info("dry run: would delete these documents from mongo")
+			log.Info("dry run: would delete these records from the source")
 		}
 		run.DocsArchived += result.DocCount
 		run.BytesRaw += result.BytesRaw
@@ -488,6 +482,7 @@ func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.Jo
 		MaxID:           result.MaxID,
 		MinTS:           result.MinTS,
 		MaxTS:           result.MaxTS,
+		Engine:          job.Source.EngineName(),
 	}
 	if err := r.store.InsertArtifact(ctx, artifact); err != nil {
 		return err
@@ -506,7 +501,7 @@ func (r *Runner) shipBatch(ctx context.Context, log *slog.Logger, job *config.Jo
 	}
 
 	// Every copy is stored and verified; the source documents may now go.
-	deleted, err := source.DeleteByIDs(ctx, log, filter, b.spool.IDs(), job.Retention.DeleteBatchSize)
+	deleted, err := src.DeleteByIDs(ctx, log, b.spool.IDs(), job.Retention.DeleteBatchSize)
 
 	// Counted before the error is checked, and recorded before it is returned.
 	// A failure partway through returns the number of chunks that did succeed,
@@ -670,22 +665,92 @@ func compressionRatio(result *archive.Result) string {
 	return fmt.Sprintf("%.1fx", float64(result.BytesRaw)/float64(result.BytesCompressed))
 }
 
-// source resolves the collection a job reads from.
+// query is a config's filter resolved for one run: time tokens evaluated, and
+// parsed into whatever form its engine wants.
+type query struct {
+	// text is the resolved filter as the run row and the log record it.
+	text string
+
+	mongoFilter     bson.D
+	mongoProjection bson.D
+	sql             string
+}
+
+// resolveQuery evaluates the filter's time tokens against now and parses it.
+// It runs before the run row is opened, so a filter that cannot be understood
+// fails without leaving a run behind.
+func resolveQuery(job *config.JobConfig, now time.Time) (*query, error) {
+	if job.Source.IsPostgres() {
+		condition, err := job.Source.SQLFilter()
+		if err != nil {
+			return nil, err
+		}
+		resolved, err := config.ResolveSQLTimeTokens(condition, now)
+		if err != nil {
+			return nil, fmt.Errorf("resolving filter for %s: %w", job.Name, err)
+		}
+		text := resolved
+		if text == "" {
+			text = "TRUE"
+		}
+		return &query{text: text, sql: resolved}, nil
+	}
+
+	resolvedFilter, err := config.ResolveTimeTokens(job.Source.Filter, now)
+	if err != nil {
+		return nil, fmt.Errorf("resolving filter for %s: %w", job.Name, err)
+	}
+	// The config file's formatting would otherwise put newlines through the log
+	// line and the catalogue row.
+	var compactFilter bytes.Buffer
+	if err := json.Compact(&compactFilter, resolvedFilter); err == nil {
+		resolvedFilter = compactFilter.Bytes()
+	}
+	filter, err := mongox.ParseFilter(resolvedFilter)
+	if err != nil {
+		return nil, err
+	}
+	projection, err := mongox.ParseProjection(job.Source.Projection)
+	if err != nil {
+		return nil, err
+	}
+	return &query{text: string(resolvedFilter), mongoFilter: filter, mongoProjection: projection}, nil
+}
+
+// source resolves what a job reads from and binds the run's filter to it.
 //
 // Split out so a test can supply its own: the runner otherwise reaches a real
 // *mongo.Collection through the pool, and the property most worth testing —
 // that a failed upload deletes nothing — needs neither a database nor a bucket.
-func (r *Runner) source(ctx context.Context, job *config.JobConfig) (mongox.Source, error) {
+func (r *Runner) source(ctx context.Context, job *config.JobConfig, q *query) (source.Source, error) {
+	if job.Source.IsPostgres() {
+		if r.postgres == nil {
+			return nil, errors.New("this process has no PostgreSQL accounts loaded")
+		}
+		db, err := r.postgres.Get(ctx, job.Source.PostgresSource)
+		if err != nil {
+			return nil, err
+		}
+		return pgsrc.Bind(ctx, db, job.Source.Database, job.Source.Collection, q.sql, job.Source.TimestampField)
+	}
+
+	var coll mongox.Source
 	if r.sourceFor != nil {
-		return r.sourceFor(ctx, job)
+		found, err := r.sourceFor(ctx, job)
+		if err != nil {
+			return nil, err
+		}
+		coll = found
+	} else {
+		client, err := r.mongo.Get(ctx, job.Source.MongoSource)
+		if err != nil {
+			return nil, err
+		}
+		collection, err := client.Collection(job.Source.Database, job.Source.Collection, job.Source.ReadPreference)
+		if err != nil {
+			return nil, err
+		}
+		coll = mongox.NewSource(collection)
 	}
-	client, err := r.mongo.Get(ctx, job.Source.MongoSource)
-	if err != nil {
-		return nil, err
-	}
-	coll, err := client.Collection(job.Source.Database, job.Source.Collection, job.Source.ReadPreference)
-	if err != nil {
-		return nil, err
-	}
-	return mongox.NewSource(coll), nil
+	return mongox.Bind(coll, q.mongoFilter, q.mongoProjection, job.Source.TimestampField), nil
 }

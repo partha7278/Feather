@@ -138,20 +138,17 @@ func (d *GDriveDestination) Check(ctx context.Context) error {
 // result is still a slash-separated path; Drive folders are made from it at
 // upload time.
 func (d *GDriveDestination) Key(key string) string {
-	if d.info.Prefix == "" {
-		return key
-	}
-	return strings.TrimSuffix(d.info.Prefix, "/") + "/" + key
+	return withPrefix(d.info.Prefix, key)
 }
 
 // Upload creates the folders the key implies and writes the archive into the
 // last of them. Re-uploading the same key replaces the file's content rather
 // than adding a second file with the same name, which Drive would happily do.
 func (d *GDriveDestination) Upload(ctx context.Context, key string, body io.Reader, size int64, meta Metadata) (string, error) {
-	dir, name := path.Split(key)
-	if name == "" {
-		return "", fmt.Errorf("uploading to %s: object key %q does not end in a file name", d.info.Alias, key)
+	if err := checkKey(key); err != nil {
+		return "", fmt.Errorf("uploading to %s: %w", d.info.Alias, err)
 	}
+	dir, name := path.Split(key)
 
 	parent, err := d.ensureFolders(ctx, dir)
 	if err != nil {
@@ -307,7 +304,21 @@ func (d *GDriveDestination) walk(ctx context.Context, dir string, create bool) (
 		if segment == "" || segment == "." {
 			continue
 		}
-		walked = path.Join(walked, segment)
+		// ".." is a folder name to Drive, not "go up", but path.Join would
+		// resolve it: the cache key would then name a different folder from
+		// the one this walk reaches, and a later key would be filed under the
+		// wrong folder. Upload refuses such keys; this keeps a lookup from
+		// walking one either.
+		if segment == ".." {
+			return "", fmt.Errorf("Drive folder path %q contains a \"..\" segment", dir)
+		}
+		// Joined by hand rather than with path.Join, so the cache key is
+		// exactly the sequence of folder names walked.
+		if walked == "" {
+			walked = segment
+		} else {
+			walked += "/" + segment
+		}
 		if cached, ok := d.folders[walked]; ok {
 			parent = cached
 			continue

@@ -34,7 +34,8 @@ test-fast:
 test-integration:
 	@FEATHER_TEST_MONGO_URI=mongodb://127.0.0.1:27018 \
 	FEATHER_TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
-	go test -race -count=1 -tags=integration -timeout 20m ./internal/e2e/...
+	FEATHER_TEST_POSTGRES_DSN='postgres://feather:feather@127.0.0.1:5433/feather?sslmode=disable' \
+	go test -race -count=1 -tags=integration -timeout 20m ./internal/e2e/... ./internal/pgsrc/... ./internal/runner/...
 
 vet:
 	go vet ./...
@@ -61,7 +62,7 @@ clean:
 install: build
 	install -m 0755 $(OUT) /usr/local/bin/$(BINARY)
 
-# Local verification rig: Mongo and MinIO in Docker.
+# Local verification rig: Mongo, PostgreSQL and MinIO in Docker.
 rig-up:
 	docker compose -f testdata/docker-compose.yml up -d
 

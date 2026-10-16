@@ -51,6 +51,55 @@ type MongoSource struct {
 	AppName    string
 }
 
+// String renders the account with its password masked, so that a log line or
+// an error that formats one with %v or %+v cannot carry the credential.
+func (m MongoSource) String() string {
+	return fmt.Sprintf("{Alias:%s URI:%s AuthSource:%s AppName:%s}", m.Alias, RedactMongoURI(m.URI), m.AuthSource, m.AppName)
+}
+
+// GoString covers %#v, which bypasses String.
+func (m MongoSource) GoString() string { return "config.MongoSource" + m.String() }
+
+// MarshalJSON masks the password for the same reason String does. Nothing
+// persists this type as JSON; the store seals the URI and the bundle export
+// has its own type.
+func (m MongoSource) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Alias      string `json:"alias"`
+		URI        string `json:"uri"`
+		AuthSource string `json:"authSource,omitempty"`
+		AppName    string `json:"appName,omitempty"`
+	}{m.Alias, RedactMongoURI(m.URI), m.AuthSource, m.AppName})
+}
+
+// PostgresSource is one PostgreSQL database feather reads from. Unlike a
+// MongoDB account it names a single database: a Postgres connection is bound to
+// one, so the DSN carries it and a config only picks the schema and table.
+type PostgresSource struct {
+	Alias   string
+	DSN     string
+	AppName string
+}
+
+// String renders the account with its password masked, so that a log line or
+// an error that formats one with %v or %+v cannot carry the credential.
+func (p PostgresSource) String() string {
+	return fmt.Sprintf("{Alias:%s DSN:%s AppName:%s}", p.Alias, RedactPostgresDSN(p.DSN), p.AppName)
+}
+
+// GoString covers %#v, which bypasses String.
+func (p PostgresSource) GoString() string { return "config.PostgresSource" + p.String() }
+
+// MarshalJSON masks the password for the same reason String does. Nothing
+// persists this type as JSON; the store seals the DSN on its own.
+func (p PostgresSource) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Alias   string `json:"alias"`
+		DSN     string `json:"dsn"`
+		AppName string `json:"appName,omitempty"`
+	}{p.Alias, RedactPostgresDSN(p.DSN), p.AppName})
+}
+
 // Destination is one place archives get written — an AWS S3 account, Oracle
 // Cloud Object Storage through its S3-compatible endpoint, or a folder in
 // Google Drive.
@@ -80,6 +129,68 @@ type Destination struct {
 	OAuthClientSecret  string
 	OAuthRefreshToken  string
 }
+
+// destinationView is a Destination as it may be shown: every credential
+// replaced by a marker that says only whether one is set.
+type destinationView struct {
+	Alias              string   `json:"alias"`
+	Provider           Provider `json:"provider"`
+	Prefix             string   `json:"prefix,omitempty"`
+	Region             string   `json:"region,omitempty"`
+	Bucket             string   `json:"bucket,omitempty"`
+	Endpoint           string   `json:"endpoint,omitempty"`
+	AccessKeyID        string   `json:"accessKeyId,omitempty"`
+	SecretAccessKey    string   `json:"secretAccessKey,omitempty"`
+	SessionToken       string   `json:"sessionToken,omitempty"`
+	StorageClass       string   `json:"storageClass,omitempty"`
+	ForcePathStyle     bool     `json:"forcePathStyle,omitempty"`
+	DriveFolderID      string   `json:"driveFolderId,omitempty"`
+	DriveID            string   `json:"driveId,omitempty"`
+	DriveSubject       string   `json:"driveSubject,omitempty"`
+	ServiceAccountJSON string   `json:"serviceAccountJson,omitempty"`
+	OAuthClientID      string   `json:"oauthClientId,omitempty"`
+	OAuthClientSecret  string   `json:"oauthClientSecret,omitempty"`
+	OAuthRefreshToken  string   `json:"oauthRefreshToken,omitempty"`
+}
+
+func maskSet(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	return "•••"
+}
+
+func (d Destination) view() destinationView {
+	return destinationView{
+		Alias: d.Alias, Provider: d.Provider, Prefix: d.Prefix,
+		Region: d.Region, Bucket: d.Bucket, Endpoint: RedactSecrets(d.Endpoint),
+		AccessKeyID:     d.AccessKeyID,
+		SecretAccessKey: maskSet(d.SecretAccessKey),
+		SessionToken:    maskSet(d.SessionToken),
+		StorageClass:    d.StorageClass, ForcePathStyle: d.ForcePathStyle,
+		DriveFolderID: d.DriveFolderID, DriveID: d.DriveID, DriveSubject: d.DriveSubject,
+		ServiceAccountJSON: maskSet(d.ServiceAccountJSON),
+		OAuthClientID:      d.OAuthClientID,
+		OAuthClientSecret:  maskSet(d.OAuthClientSecret),
+		OAuthRefreshToken:  maskSet(d.OAuthRefreshToken),
+	}
+}
+
+// String renders the account with every credential masked, so that a log
+// line or an error that formats one with %v or %+v cannot carry a key.
+//
+// DestinationRecord in the store embeds Destination, so these methods are
+// promoted to it as well — which is the point: the record holds the same
+// decrypted credentials.
+func (d Destination) String() string { return fmt.Sprintf("%+v", d.view()) }
+
+// GoString covers %#v, which bypasses String.
+func (d Destination) GoString() string { return "config.Destination" + d.String() }
+
+// MarshalJSON masks the credentials for the same reason String does. Nothing
+// persists this type as JSON; the store seals the credentials on its own and
+// the bundle export has its own type.
+func (d Destination) MarshalJSON() ([]byte, error) { return json.Marshal(d.view()) }
 
 // DriveRoot is the folder archives go into, defaulting to the account's own My
 // Drive when none was named.
@@ -166,22 +277,100 @@ func defaultDataDir() string {
 }
 
 // RedactMongoURI strips the password from a connection string so it can be
-// shown in the UI, in logs, and in error messages.
+// shown in the UI, in logs, and in error messages. Credentials carried in the
+// options — an AWS session token in authMechanismProperties, a certificate key
+// password — are masked too.
 func RedactMongoURI(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.User == nil {
+		if err == nil {
+			parsed.RawQuery = redactURIOptions(parsed.RawQuery)
+			return strings.ReplaceAll(parsed.String(), "%E2%80%A2%E2%80%A2%E2%80%A2", "•••")
+		}
 		if at := strings.LastIndex(raw, "@"); at >= 0 {
 			// Unparseable but clearly carrying credentials — show only the host.
-			return "•••@" + raw[at+1:]
+			return "•••@" + redactRawOptions(raw[at+1:])
 		}
-		return raw
+		return redactRawOptions(raw)
 	}
 	if _, hasPassword := parsed.User.Password(); hasPassword {
 		parsed.User = url.UserPassword(parsed.User.Username(), "•••")
 	}
+	parsed.RawQuery = redactURIOptions(parsed.RawQuery)
 	// url.UserPassword re-encodes the placeholder; undo that so it stays legible.
 	return strings.ReplaceAll(parsed.String(), "%E2%80%A2%E2%80%A2%E2%80%A2", "•••")
 }
+
+// redactRawOptions masks the options of a string that could not be parsed as
+// a URL, taking everything after the first "?" as the query.
+func redactRawOptions(raw string) string {
+	if q := strings.IndexByte(raw, '?'); q >= 0 {
+		return raw[:q+1] + redactURIOptions(raw[q+1:])
+	}
+	return raw
+}
+
+// redactURIOptions masks the value of every query option that can carry a
+// credential, leaving the rest — tls, replicaSet, authSource — readable.
+func redactURIOptions(query string) string {
+	if query == "" {
+		return query
+	}
+	parts := strings.FieldsFunc(query, func(r rune) bool { return r == '&' || r == ';' })
+	changed := false
+	for i, part := range parts {
+		key, _, hasValue := strings.Cut(part, "=")
+		if !hasValue {
+			continue
+		}
+		name := key
+		if unescaped, err := url.QueryUnescape(key); err == nil {
+			name = unescaped
+		}
+		if isSecretOption(name) {
+			parts[i] = key + "=•••"
+			changed = true
+		}
+	}
+	if !changed {
+		return query
+	}
+	return strings.Join(parts, "&")
+}
+
+// isSecretOption names the connection options whose values are credentials.
+// authMechanismProperties is masked whole: it is where MONGODB-AWS carries
+// AWS_SESSION_TOKEN, and its other entries are not worth the parsing.
+func isSecretOption(name string) bool {
+	name = strings.ToLower(name)
+	if name == "authmechanismproperties" {
+		return true
+	}
+	for _, marker := range []string{"password", "passwd", "secret", "token", "apikey", "api_key", "credential"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// RedactPostgresDSN strips the password from a PostgreSQL connection string in
+// either of its two shapes: a postgres:// URL, where the password sits in the
+// userinfo or in a ?password= parameter, or the keyword form libpq also accepts
+// ("host=db user=feather password=..."), where it is a key=value pair.
+func RedactPostgresDSN(raw string) string {
+	out := raw
+	if strings.Contains(raw, "://") {
+		out = RedactMongoURI(raw)
+	}
+	// libpq lets a keyword value be single-quoted, spaces and \' escapes
+	// included, which the general key=value pattern would cut off at the
+	// first space.
+	out = quotedPasswordRe.ReplaceAllString(out, "$1'•••'")
+	return credentialPatterns[1].ReplaceAllString(out, "$1$2•••")
+}
+
+var quotedPasswordRe = regexp.MustCompile(`(?i)(\b(?:ssl)?password\s*=\s*)'(?:\\.|[^'\\])*'`)
 
 // credentialPatterns match the shapes a secret takes when it leaks into an
 // error message. Drivers and SDKs are not careful about this: the MongoDB
@@ -189,11 +378,15 @@ func RedactMongoURI(raw string) string {
 var credentialPatterns = []*regexp.Regexp{
 	// Any URL with userinfo — mongodb://, mongodb+srv://, https:// with a
 	// token in it. The password is what follows the colon.
-	regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]+):([^/\s@]+)@`),
-	// AWS-style key=value pairs in a message.
-	regexp.MustCompile(`(?i)((?:secret|password|passwd|token|apikey|api_key|access_key|secretaccesskey)\s*[=:]\s*)("?)([^\s"',;)]+)`),
+	// The password may hold an unencoded "/", so only whitespace and "@" end it.
+	regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]+):([^\s@]+)@`),
+	// AWS-style key=value pairs in a message, a query string or a form body,
+	// and the same keys as JSON fields ("password":"...").
+	regexp.MustCompile(`(?i)((?:secret|password|passwd|token|apikey|api_key|access_key|secretaccesskey)"?\s*[=:]\s*)("?)([^\s"',;)&]+)`),
 	// A bare AWS secret access key: 40 characters of base64 alphabet.
 	regexp.MustCompile(`\b[A-Za-z0-9/+=]{40}\b`),
+	// An Authorization header's bearer credential.
+	regexp.MustCompile(`(?i)(\bbearer\s+)([A-Za-z0-9\-._~+/]+=*)`),
 }
 
 // RedactSecrets strips credentials out of a string that is about to be shown to
@@ -210,6 +403,7 @@ func RedactSecrets(text string) string {
 	out := credentialPatterns[0].ReplaceAllString(text, "$1$2:•••@")
 	out = credentialPatterns[1].ReplaceAllString(out, "$1$2•••")
 	out = credentialPatterns[2].ReplaceAllString(out, "•••")
+	out = credentialPatterns[3].ReplaceAllString(out, "$1•••")
 	return out
 }
 

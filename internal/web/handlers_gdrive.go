@@ -116,7 +116,7 @@ func (s *Server) handleGDriveCallback(w http.ResponseWriter, r *http.Request) {
 	if token.RefreshToken == "" {
 		// Without a refresh token feather could upload today and fail in an
 		// hour, which is worse than failing now.
-		s.setFlash(w, "error", "Google returned an access token but no refresh token, so %s could not be connected. Remove feather from the account's third-party access and try again.", record.Alias)
+		s.setFlash(w, "error", "Google returned an access token but no refresh token, so %s could not be connected. Remove Feather from the account's third-party access and try again.", record.Alias)
 		http.Redirect(w, r, destinationFormPath(record.ID), http.StatusSeeOther)
 		return
 	}

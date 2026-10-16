@@ -1,0 +1,102 @@
+/* Retention config list and form — page-only styles. Shared components live in /static/app.css.
+   This file is linked on every page, so every rule is scoped under .configs-page. */
+
+/* --- list ---------------------------------------------------------------- */
+
+/* Name cell: the name and its state badges wrap together; a long name breaks
+   at its dashes instead of stretching the table. */
+.configs-page .cfg-cell { max-width: 24rem; }
+.configs-page .cfg-name { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.configs-page .cfg-name > a { min-width: 0; overflow-wrap: anywhere; }
+.configs-page .cfg-name > .badge { margin: 0; }
+.configs-page .cfg-source { margin-top: 2px; overflow-wrap: anywhere; }
+.configs-page .cfg-dests > div + div { margin-top: 2px; }
+/* A deleting config with one destination: a quiet warning line, not a second pill
+   next to the "deletes" badge. */
+.configs-page .cfg-one-copy { margin-top: 2px; color: var(--warn); font-weight: 500; }
+.configs-page .page-head p { text-wrap: pretty; }
+
+/* After archiving: the state on one line, its switch under it, so the column
+   stays narrow with the longer "deletes from MongoDB" wording. */
+.configs-page .cfg-deletion .state-pair { flex-direction: column; align-items: flex-start; gap: 0; }
+.configs-page .cfg-deletion .state-pair .btn.link { padding: 0; line-height: 18px; margin-top: 2px; }
+
+/* --- form ---------------------------------------------------------------- */
+
+/* The interval note sits under four fields that each carry a hint; pull it up. */
+.config-form-page .cfg-schedule-note { margin: 4px 0 0; }
+
+/* The header buttons act on the saved config; the note says so under them. */
+.config-form-page .page-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; max-width: 480px; }
+.config-form-page .cfg-saved-hint { flex: 1 1 100%; margin: 0; text-align: right; }
+
+/* Running a config that deletes: the play icon carries the tone, nothing louder. */
+.config-form-page .cfg-run-deletes svg { color: var(--bad); }
+
+/* Danger zone. Off: a calm bordered switch. On: the switch tints red and the
+   deletion settings attach underneath it as one panel. */
+.config-form-page .danger-zone .switch-card { margin-bottom: 8px; padding: 16px; }
+.config-form-page .switch-card input[type="checkbox"] { margin-top: 2px; flex: none; }
+.config-form-page .switch-title { display: block; color: var(--text); font-weight: 600; }
+.config-form-page .switch-card label .hint { margin-top: 8px; font-size: 13px; }
+.config-form-page .switch-state { display: flex; gap: 8px; align-items: baseline; }
+.config-form-page .switch-state + .switch-state { margin-top: 4px; }
+.config-form-page .switch-key {
+  flex: none;
+  min-width: 28px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+.config-form-page .switch-card:has(input:checked) .switch-state:last-child .switch-key { background: var(--bad); color: var(--surface); }
+.config-form-page .switch-card:has(input:checked) .switch-title { color: var(--bad); }
+.config-form-page .cfg-guard { margin: 0 0 0 2px; }
+
+.config-form-page .switch-card:has(input:checked):has(~ [data-deletion-details]:not([hidden])) {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.config-form-page .switch-card:has(input:checked) ~ .cfg-guard { display: none; }
+.config-form-page .danger-zone [data-deletion-details] {
+  padding: 16px;
+  border: 1px solid var(--bad-line);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--surface);
+}
+/* The advice reads as a line inside the panel, not a second red box. */
+.config-form-page .cfg-deletion-advice {
+  margin: 0 0 16px;
+  padding: 0 0 16px 26px;
+  border: none;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: none;
+}
+.config-form-page .cfg-deletion-advice::before { left: 0; top: 2px; }
+.config-form-page .cfg-ts-advice { margin: -4px 0 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border-soft); }
+.config-form-page .cfg-ts-label { margin-right: 4px; font-weight: 600; }
+.config-form-page .cfg-one-copy-notice { margin: 12px 0 0; }
+.config-form-page .cfg-deletion-options { align-items: start; row-gap: 16px; }
+.config-form-page .cfg-deletion-options .field { margin-bottom: 0; }
+.config-form-page .cfg-deletion-options .field.inline { padding-top: 24px; }
+
+/* --- narrow screens ------------------------------------------------------ */
+
+@media (max-width: 860px) {
+  /* Stacked rows: keep the name clear of the row actions, and let schedule
+     lines wrap inside their half-width slot. */
+  .configs-page .table-wrap table.stack td.first { padding-right: 88px; }
+  .configs-page .table-wrap table.stack td.nowrap { white-space: normal; }
+  .config-form-page .page-actions { justify-content: flex-start; }
+  .config-form-page .cfg-saved-hint { text-align: left; }
+  .config-form-page .cfg-deletion-options .field.inline { padding-top: 0; }
+}
+
+

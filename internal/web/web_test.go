@@ -301,6 +301,48 @@ func TestConfigFormRejectsAnUnknownFileNameVariable(t *testing.T) {
 	}
 }
 
+// A rejected form used to redirect back to a fresh copy of the page, throwing
+// away everything typed — including the filter that needed fixing.
+func TestConfigFormKeepsWhatWasTypedWhenTheFilterIsInvalid(t *testing.T) {
+	server := testServer(t)
+	createAdmin(t, server)
+	session := signIn(t, server)
+	seedAccountsOnly(t, server)
+
+	form := url.Values{
+		"name": {"orders-archive"}, "mongoSource": {"prod"}, "database": {"shop"}, "collection": {"orders"},
+		"filter": {`{"status": "completed",}`}, "destinations": {"cold"},
+		"keyTemplate": {"archive/{collection}/{runId}-{seq}{ext}"},
+		"codec":       {"gzip"}, "codecLevel": {"6"}, "batchMaxBytes": {"8MB"},
+		"scheduleKind": {"cron"}, "cron": {"15 3 * * *"}, "timezone": {"Asia/Kolkata"}, "maxRuntime": {"45m"},
+		"readPreference": {"primary"},
+	}
+	response := post(t, server, "/configs", form, session)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status %d, want the form shown back", response.Code)
+	}
+
+	body := response.Body.String()
+	for _, want := range []string{
+		"The filter is not valid JSON.",
+		`{&#34;status&#34;: &#34;completed&#34;,}`,
+		`value="orders-archive"`,
+		`value="shop"`,
+		`value="orders"`,
+		`value="15 3 * * *"`,
+		`value="Asia/Kolkata"`,
+		`value="45m"`,
+		`value="8MB"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the re-rendered form lost %q", want)
+		}
+	}
+	if _, err := server.app.Store.JobByName(context.Background(), "orders-archive"); err == nil {
+		t.Fatal("a config with an invalid filter was saved")
+	}
+}
+
 // --- helpers ---------------------------------------------------------------
 
 func testServer(t *testing.T) *Server {

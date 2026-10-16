@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/unifers/feather/internal/app"
 	"github.com/unifers/feather/internal/bundle"
@@ -37,6 +37,18 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	selfBackup, err := s.app.SelfBackupConfig(r.Context())
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	selfBackups, err := app.ListSelfBackups(selfBackup.Dir)
+	if err != nil {
+		// Listing is informational; an unreadable directory is shown as an
+		// error on the card rather than taking the whole page down.
+		s.log.Warn("could not list database backups", "dir", selfBackup.Dir, "error", err)
+	}
+
 	s.render(w, r, "settings", pageData{
 		Title: "Settings",
 		Nav:   "settings",
@@ -48,12 +60,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"MinPassphrase":   bundle.MinPassphraseLength,
 			"DatabasePath":    s.app.Store.Path(),
 			"SpoolDir":        s.app.Env.SpoolDir,
-			"DataDir":         s.app.Env.DataDir,
 			"WebhookURL":      webhookURL,
 			"NotifyOnSuccess": notifyOnSuccess == 1,
 			"MasterKeyPath":   s.app.Env.MasterKeyPath,
 			"MasterKeyEnv":    s.app.Env.MasterKey != "",
 			"Host":            s.app.Host,
+			"SelfBackup":      selfBackup,
+			"SelfBackups":     selfBackups,
+			"SelfBackupError": errString(err),
+			"SelfBackupMax":   app.MaxSelfBackupKeep,
 		},
 	})
 }
@@ -113,7 +128,86 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	// The concurrency cap is fixed when the scheduler is built, so it is the one
 	// setting here that genuinely needs a restart.
 	s.audit(r, store.AuditSettingsSaved, "instance", "", "")
-	s.setFlash(w, "ok", "Settings saved. A change to concurrent jobs takes effect when feather restarts.")
+	s.setFlash(w, "ok", "Settings saved. A change to concurrent jobs takes effect when Feather restarts.")
+	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+}
+
+// handleSelfBackupSave stores the automatic database backup settings and
+// applies them at once: today's snapshot is taken if it is missing, and a
+// lowered count prunes straight away rather than at the next hourly check.
+func (s *Server) handleSelfBackupSave(w http.ResponseWriter, r *http.Request) {
+	f, err := newForm(r)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+
+	keep := f.Int("selfBackupKeep", 0)
+	if keep < 0 || keep > app.MaxSelfBackupKeep {
+		s.setFlash(w, "error", "Backups to keep must be between 0 and %d.", app.MaxSelfBackupKeep)
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	dir := strings.TrimSpace(f.Raw("selfBackupDir"))
+	if dir != "" && !filepath.IsAbs(dir) {
+		// Relative to what would depend on the working directory of whatever
+		// started the process, which is not something to discover at restore time.
+		s.setFlash(w, "error", "The backup directory must be an absolute path, such as /var/backups/feather.")
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+
+	if err := s.app.Store.SetMeta(r.Context(), app.MetaSelfBackupKeep, strconv.Itoa(keep)); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if err := s.app.Store.SetMeta(r.Context(), app.MetaSelfBackupDir, dir); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.audit(r, store.AuditSettingsSaved, "instance", "database backups", "")
+
+	if keep == 0 {
+		s.setFlash(w, "ok", "Automatic database backups are off. Existing backups were left in place.")
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	if _, err := s.app.RunSelfBackup(r.Context()); err != nil {
+		s.log.Error("database backup failed", "error", err)
+		s.setFlash(w, "error", "Settings saved, but the backup could not be written: %s", err.Error())
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	s.setFlash(w, "ok", "Saved. Feather keeps one database backup a day, the newest %d.", keep)
+	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+}
+
+// handleSelfBackupRun takes today's snapshot now, if it has not been taken.
+func (s *Server) handleSelfBackupRun(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.app.SelfBackupConfig(r.Context())
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if !settings.Enabled() {
+		s.setFlash(w, "error", "Automatic database backups are off. Set how many to keep first.")
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	written, err := s.app.RunSelfBackup(r.Context())
+	if err != nil {
+		s.log.Error("database backup failed", "error", err)
+		s.setFlash(w, "error", "The backup could not be written: %s", err.Error())
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	if written == nil {
+		s.setFlash(w, "ok", "Today's backup already exists. Feather keeps one per day.")
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	s.audit(r, store.AuditDatabaseBackedUp, "instance", written.Path, "")
+	s.setFlash(w, "ok", "Wrote %s (%s).", written.Name, humanBytes(written.Size))
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
 
@@ -204,47 +298,53 @@ func (s *Server) handleAdminDelete(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
 
-// handleSettingsBackup writes a consistent snapshot of feather's own database.
+// handleMasterKeyDownload hands the master key over as a file, so it can be
+// kept with the backups that cannot be read without it.
 //
-// This is deliberately separate from Export. An export bundle is a portable
-// copy of the configuration — accounts, destinations, retention rules — and is
-// what you carry to another machine. A backup is the whole state, catalogue and
-// administrator logins included, and is what you restore from after losing the
-// server. The README used to describe copying the file, which is wrong while
-// feather is running: this takes the snapshot properly.
-func (s *Server) handleSettingsBackup(w http.ResponseWriter, r *http.Request) {
+// The current password is asked for again. A session left open on someone's
+// laptop can already change retention rules, but it should not be able to walk
+// away with the one thing that turns a stolen database file into every
+// connection string and cloud secret in it.
+func (s *Server) handleMasterKeyDownload(w http.ResponseWriter, r *http.Request) {
+	_, user, ok := sessionFrom(r)
+	if !ok {
+		s.redirectToLogin(w, r)
+		return
+	}
 	f, err := newForm(r)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-
-	path := strings.TrimSpace(f.Raw("path"))
-	if path == "" {
-		path = filepath.Join(filepath.Dir(s.app.Store.Path()),
-			"feather-backup-"+time.Now().UTC().Format("20060102T150405Z")+".db")
-	}
-	if !filepath.IsAbs(path) {
-		s.setFlash(w, "error", "Give the full path to write the backup to.")
+	if err := s.app.Store.CheckPassword(r.Context(), user.ID, f.Raw("password")); err != nil {
+		s.log.Warn("master key download refused", "email", user.Email, "ip", s.clientIP(r))
+		s.setFlash(w, "error", "That password is not correct. The master key was not downloaded.")
 		http.Redirect(w, r, "/settings", http.StatusSeeOther)
 		return
 	}
 
-	size, err := s.app.Store.Backup(r.Context(), path)
-	if err != nil {
-		s.setFlash(w, "error", "%s", config.RedactSecrets(err.Error()))
-		http.Redirect(w, r, "/settings", http.StatusSeeOther)
-		return
+	// Served from wherever the running process got it, so what is downloaded
+	// is exactly the key that opens this database.
+	key, source := strings.TrimSpace(s.app.Env.MasterKey), "FEATHER_MASTER_KEY"
+	if key == "" {
+		data, err := os.ReadFile(s.app.Env.MasterKeyPath)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		key, source = strings.TrimSpace(string(data)), s.app.Env.MasterKeyPath
 	}
 
-	s.audit(r, store.AuditDatabaseBackedUp, "instance", path, humanBytes(size))
-	s.log.Info("database backup written", "by", currentUserEmail(r), "path", path, "bytes", size)
+	s.audit(r, store.AuditMasterKeyDownloaded, "instance", source, "")
+	s.log.Warn("master key downloaded", "by", user.Email, "ip", s.clientIP(r), "source", source)
 
-	// Said every time. A backup without the key cannot be opened, and that is
-	// the failure people discover at the worst possible moment.
-	s.setFlash(w, "success", "Wrote %s (%s). It needs the master key at %s to be read — keep a copy of that key with it.",
-		path, humanBytes(size), s.app.Env.MasterKeyPath)
-	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+	body := key + "\n"
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="feather-master.key"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+	_, _ = w.Write([]byte(body))
 }
 
 // humanBytes formats a size the way an operator reads one.
@@ -259,6 +359,13 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // boolMeta stores a checkbox as the "1"/"0" the meta table uses.

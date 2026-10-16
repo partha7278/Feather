@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en"{{with .Theme}} data-theme="{{.}}"{{end}}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,69 +7,111 @@
 {{/* A meta refresh rather than a script: the CSP forbids inline JavaScript, and
      a page that reloads itself while a run is in flight is the whole point. */}}
 {{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
-<title>{{.Title}} · feather</title>
+<title>{{.Title}} · Feather</title>
 <link rel="stylesheet" href="/static/app.css">
+{{/* Page-only styles. Shared components live in app.css; each file below is
+     owned by one group of pages. */}}
+<link rel="stylesheet" href="/static/pages/dashboard.css">
+<link rel="stylesheet" href="/static/pages/configs.css">
+<link rel="stylesheet" href="/static/pages/accounts.css">
+<link rel="stylesheet" href="/static/pages/activity.css">
+<link rel="stylesheet" href="/static/pages/auth.css">
+<link rel="stylesheet" href="/static/pages/imports.css">
 <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
 </head>
-<body>
+<body{{with .Nav}} class="page-{{.}}"{{end}}>
+<a class="skip-link" href="#main">Skip to content</a>
 {{if .LoggedIn}}
 <div class="shell">
-  <nav class="sidebar">
-    {{template "brand" .}}
+  <nav class="sidebar" aria-label="Main">
+    <div class="sidebar-top">
+      {{template "brand" .}}
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-links" hidden>
+        <span class="visually-hidden">Menu</span>{{template "icon-menu"}}
+      </button>
+    </div>
 
-    <a class="nav-link {{if eq .Nav "dashboard"}}active{{end}}" href="/">
-      {{template "icon-home"}} Overview
-    </a>
-    <a class="nav-link {{if eq .Nav "configs"}}active{{end}}" href="/configs">
-      {{template "icon-clock"}} Retention configs
-    </a>
-    <a class="nav-link {{if eq .Nav "backups"}}active{{end}}" href="/backups">
-      {{template "icon-archive"}} Backups
-    </a>
-    <a class="nav-link {{if eq .Nav "runs"}}active{{end}}" href="/runs">
-      {{template "icon-activity"}} Runs
-    </a>
-    <a class="nav-link {{if eq .Nav "audit"}}active{{end}}" href="/audit">
-      {{template "icon-shield"}} Activity
-    </a>
+    <div class="nav-links" id="nav-links">
+    <div class="nav-section" role="group" aria-label="Operate">
+      <a class="nav-link {{if eq .Nav "dashboard"}}active{{end}}" href="/"{{if eq .Nav "dashboard"}} aria-current="page"{{end}}>
+        {{template "icon-home"}} Overview
+      </a>
+      <a class="nav-link {{if eq .Nav "configs"}}active{{end}}" href="/configs"{{if eq .Nav "configs"}} aria-current="page"{{end}}>
+        {{template "icon-clock"}} Retention configs
+      </a>
+      <a class="nav-link {{if eq .Nav "runs"}}active{{end}}" href="/runs"{{if eq .Nav "runs"}} aria-current="page"{{end}}>
+        {{template "icon-activity"}} Runs
+      </a>
+      <a class="nav-link {{if eq .Nav "backups"}}active{{end}}" href="/backups"{{if eq .Nav "backups"}} aria-current="page"{{end}}>
+        {{template "icon-archive"}} Archives
+      </a>
+      <a class="nav-link {{if eq .Nav "imports"}}active{{end}}" href="/imports"{{if eq .Nav "imports"}} aria-current="page"{{end}}>
+        {{template "icon-upload"}} Imports
+      </a>
+    </div>
+    <div class="nav-section" role="group" aria-labelledby="nav-connections">
+      <div class="nav-group" id="nav-connections">Connections</div>
+      <a class="nav-link {{if eq .Nav "mongo"}}active{{end}}" href="/mongo"{{if eq .Nav "mongo"}} aria-current="page"{{end}}>
+        {{template "icon-database"}} MongoDB
+      </a>
+      <a class="nav-link {{if eq .Nav "postgres"}}active{{end}}" href="/postgres"{{if eq .Nav "postgres"}} aria-current="page"{{end}}>
+        {{template "icon-database"}} PostgreSQL
+      </a>
+      <a class="nav-link {{if eq .Nav "destinations"}}active{{end}}" href="/destinations"{{if eq .Nav "destinations"}} aria-current="page"{{end}}>
+        {{template "icon-cloud"}} Destinations
+      </a>
+    </div>
+    <div class="nav-section" role="group" aria-labelledby="nav-admin">
+      <div class="nav-group" id="nav-admin">Admin</div>
+      <a class="nav-link {{if eq .Nav "audit"}}active{{end}}" href="/audit"{{if eq .Nav "audit"}} aria-current="page"{{end}}>
+        {{template "icon-shield"}} Audit log
+      </a>
+      <a class="nav-link {{if eq .Nav "settings"}}active{{end}}" href="/settings"{{if eq .Nav "settings"}} aria-current="page"{{end}}>
+        {{template "icon-settings"}} Settings
+      </a>
+    </div>
 
-    <div class="nav-group">Accounts</div>
-    <a class="nav-link {{if eq .Nav "mongo"}}active{{end}}" href="/mongo">
-      {{template "icon-database"}} MongoDB
-    </a>
-    <a class="nav-link {{if eq .Nav "destinations"}}active{{end}}" href="/destinations">
-      {{template "icon-cloud"}} Destinations
-    </a>
-    <a class="nav-link {{if eq .Nav "settings"}}active{{end}}" href="/settings">
-      {{template "icon-settings"}} Settings
-    </a>
-
-    <div class="sidebar-foot">
-      <span class="avatar" aria-hidden="true">{{slice .User.Email 0 1}}</span>
-      <div class="who">
-        <strong>Administrator</strong>
-        <span title="{{.User.Email}}">{{.User.Email}}</span>
-      </div>
-      <form method="post" action="/logout">
+      {{/* An ordinary form post, so it works with app.js blocked; with it, the
+           switch applies at once and nothing reloads. */}}
+      <form class="theme-switch" method="post" action="/theme">
         <input type="hidden" name="csrf" value="{{.CSRF}}">
-        <button class="btn small ghost" type="submit" title="Sign out">Sign out</button>
+        <span id="theme-label">Theme</span>
+        <span class="theme-options" role="group" aria-labelledby="theme-label">
+          <button type="submit" name="theme" value="light" title="Light" aria-label="Light" aria-pressed="{{if eq .Theme "light"}}true{{else}}false{{end}}">{{template "icon-sun"}}</button>
+          <button type="submit" name="theme" value="dark" title="Dark" aria-label="Dark" aria-pressed="{{if eq .Theme "dark"}}true{{else}}false{{end}}">{{template "icon-moon"}}</button>
+          <button type="submit" name="theme" value="system" title="Match system" aria-label="Match system" aria-pressed="{{if eq .Theme ""}}true{{else}}false{{end}}">{{template "icon-monitor"}}</button>
+        </span>
       </form>
+
+      <div class="sidebar-foot">
+        <span class="avatar" aria-hidden="true">{{slice .User.Email 0 1}}</span>
+        <div class="who">
+          <strong>Administrator</strong>
+          <span title="{{.User.Email}}">{{.User.Email}}</span>
+        </div>
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf" value="{{.CSRF}}">
+          <button class="btn small ghost icon-only" type="submit" title="Sign out" aria-label="Sign out">{{template "icon-logout"}}</button>
+        </form>
+      </div>
     </div>
   </nav>
 
-  <main class="main">
-    {{template "flash" .}}
-    {{template "content" .}}
+  <main class="main" id="main" tabindex="-1">
+    <div class="main-inner">
+      {{template "flash" .}}
+      {{template "content" .}}
+    </div>
   </main>
 </div>
 {{else}}
-<div class="centred">
-  <div style="width:100%;max-width:440px">
+<main class="centred" id="main" tabindex="-1">
+  <div class="centred-inner">
     {{template "brand" .}}
     {{template "flash" .}}
     {{template "content" .}}
   </div>
-</div>
+</main>
 {{end}}
 <script src="/static/app.js"></script>
 </body>
@@ -78,10 +120,10 @@
 {{define "brand"}}
 <div class="brand">
   {{template "logo"}}
-  <span>feather<small>MongoDB retention &amp; archival</small></span>
+  <span class="brand-text">Feather<small>Database retention &amp; archival</small></span>
 </div>
 {{end}}
 
 {{define "flash"}}
-{{with .Flash}}<div class="flash {{.Kind}}">{{.Message}}</div>{{end}}
+{{with .Flash}}<div class="flash {{.Kind}}" role="{{if eq .Kind "error"}}alert{{else}}status{{end}}">{{.Message}}</div>{{end}}
 {{end}}

@@ -517,5 +517,12 @@ func parseSameSite(referer string, r *http.Request) (string, error) {
 	if !strings.HasPrefix(parsed.Path, "/") {
 		return "", errors.New("referer is not a path on this site")
 	}
-	return parsed.RequestURI(), nil
+	// A same-host referer can still carry a path such as "//evil.com" or
+	// "/\evil.com", which a browser resolves off-site once it is a Location
+	// or an href. safeNext already knows every such shape.
+	path := safeNext(parsed.RequestURI())
+	if path == "" {
+		return "", errors.New("referer path would leave the site")
+	}
+	return path, nil
 }

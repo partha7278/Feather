@@ -147,6 +147,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /mongo/{id}/test", s.guard(s.handleMongoTest))
 	mux.HandleFunc("POST /mongo/{id}/delete", s.guard(s.handleMongoDelete))
 
+	mux.HandleFunc("GET /postgres", s.guard(s.handlePostgresList))
+	mux.HandleFunc("GET /postgres/new", s.guard(s.handlePostgresForm))
+	mux.HandleFunc("GET /postgres/{id}", s.guard(s.handlePostgresForm))
+	mux.HandleFunc("POST /postgres", s.guard(s.handlePostgresSave))
+	mux.HandleFunc("POST /postgres/{id}", s.guard(s.handlePostgresSave))
+	mux.HandleFunc("POST /postgres/{id}/test", s.guard(s.handlePostgresTest))
+	mux.HandleFunc("POST /postgres/{id}/delete", s.guard(s.handlePostgresDelete))
+
 	mux.HandleFunc("GET /destinations", s.guard(s.handleDestinationList))
 	mux.HandleFunc("GET /destinations/new", s.guard(s.handleDestinationForm))
 	mux.HandleFunc("GET /destinations/{id}", s.guard(s.handleDestinationForm))
@@ -175,12 +183,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /audit", s.guard(s.handleAudit))
 	mux.HandleFunc("GET /runs/{id}", s.guard(s.handleRunDetail))
 
+	mux.HandleFunc("GET /imports", s.guard(s.handleImportList))
+	mux.HandleFunc("GET /imports/new", s.guard(s.handleImportForm))
+	mux.HandleFunc("POST /imports", s.guard(s.handleImportStart))
+	mux.HandleFunc("POST /imports/upload", s.limitUpload(maxImportUploadBytes, s.guard(s.handleImportUpload)))
+	mux.HandleFunc("GET /imports/{id}", s.guard(s.handleImportDetail))
+	mux.HandleFunc("POST /imports/{id}/run", s.guard(s.handleImportRerun))
+
+	mux.HandleFunc("POST /theme", s.guard(s.handleTheme))
+
 	mux.HandleFunc("GET /settings", s.guard(s.handleSettings))
 	mux.HandleFunc("POST /settings", s.guard(s.handleSettingsSave))
 	mux.HandleFunc("POST /settings/password", s.guard(s.handlePasswordChange))
 	mux.HandleFunc("POST /settings/admins", s.guard(s.handleAdminCreate))
 	mux.HandleFunc("POST /settings/admins/{id}/delete", s.guard(s.handleAdminDelete))
-	mux.HandleFunc("POST /settings/backup", s.guard(s.handleSettingsBackup))
+	mux.HandleFunc("POST /settings/db-backups", s.guard(s.handleSelfBackupSave))
+	mux.HandleFunc("POST /settings/db-backups/run", s.guard(s.handleSelfBackupRun))
+	mux.HandleFunc("POST /settings/master-key", s.guard(s.handleMasterKeyDownload))
 	mux.HandleFunc("POST /settings/export", s.guard(s.handleSettingsExport))
 	mux.HandleFunc("POST /settings/import", limitBody(maxBundleBytes, s.guard(s.handleSettingsImport)))
 
@@ -191,8 +210,9 @@ func (s *Server) Handler() http.Handler {
 
 // maxFormBytes bounds an ordinary form post. The largest legitimate one is a
 // retention config carrying a filter and a projection, which is kilobytes; a
-// megabyte is generous. The bundle import has its own, larger limit applied at
-// its route, and is the only thing that needs one.
+// megabyte is generous. The bundle import and the archive upload have their
+// own, larger limits applied at their routes, and are the only things that
+// need one.
 const maxFormBytes = 1 << 20
 
 // limitRequestBody caps how much feather will read from a request.
@@ -206,9 +226,10 @@ func (s *Server) limitRequestBody(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// The bundle route sets its own, larger limit; applying this one first
-		// would override it, since MaxBytesReader does not nest.
-		if r.URL.Path == "/settings/import" {
+		// The bundle and upload routes set their own, larger limits; applying
+		// this one first would override them, since MaxBytesReader does not
+		// nest.
+		if r.URL.Path == "/settings/import" || r.URL.Path == "/imports/upload" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -11,9 +11,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -122,7 +124,7 @@ func (w *Webhook) Notify(ctx context.Context, event Event) {
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(body))
 	if err != nil {
-		w.log.Warn("could not build notification request", "error", err)
+		w.log.Warn("could not build notification request", "url_host", hostOf(w.url), "error", w.safeError(err))
 		return
 	}
 	request.Header.Set("Content-Type", "application/json")
@@ -130,7 +132,7 @@ func (w *Webhook) Notify(ctx context.Context, event Event) {
 
 	response, err := w.client.Do(request)
 	if err != nil {
-		w.log.Warn("could not deliver notification", "kind", event.Kind, "error", config.RedactSecrets(err.Error()))
+		w.log.Warn("could not deliver notification", "kind", event.Kind, "url_host", hostOf(w.url), "error", w.safeError(err))
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -155,13 +157,36 @@ func Describe(configName, status string, archived, deleted int64, err error) str
 	return fmt.Sprintf("feather: retention config %q archived %d documents", configName, archived)
 }
 
+// hostOf names the webhook endpoint by host alone. A chat webhook URL is a
+// bearer credential — Slack, Discord and Teams carry the secret in the path or
+// the query, and some operators put one in the userinfo — so nothing but the
+// host may be logged.
 func hostOf(raw string) string {
+	rest := raw
 	if i := strings.Index(raw, "://"); i >= 0 {
-		rest := raw[i+3:]
-		if j := strings.IndexAny(rest, "/?"); j >= 0 {
-			return rest[:j]
-		}
-		return rest
+		rest = raw[i+3:]
 	}
-	return raw
+	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+		rest = rest[:j]
+	}
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
+	return rest
+}
+
+// safeError renders a delivery error without the webhook URL. Go's transport
+// errors quote the whole URL, path and query included; the *url.Error is
+// rebuilt around the host, and any other mention of the URL is cut out too.
+func (w *Webhook) safeError(err error) string {
+	host := hostOf(w.url)
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = &url.Error{Op: urlErr.Op, URL: host, Err: urlErr.Err}
+	}
+	message := err.Error()
+	if w.url != "" {
+		message = strings.ReplaceAll(message, w.url, host)
+	}
+	return config.RedactSecrets(message)
 }

@@ -1,0 +1,18 @@
+/* Imports: the list, the form and an import's own page — page-only styles.
+   Shared components live in /static/app.css; the progress bar, stat strip and
+   run-meta list are the run pages' own, reused as they are. Every rule is
+   scoped to .page-imports, since every page loads every stylesheet. */
+
+/* The mode choice is the one radio group in the panel. */
+.page-imports .import-modes { flex-direction: column; flex-wrap: nowrap; gap: 12px; }
+.page-imports .import-modes .field.inline { margin: 0; }
+.page-imports .import-modes input[type="radio"] { margin: 3px 0 0; accent-color: var(--primary); flex: none; }
+
+.page-imports .import-source { margin: 0 0 16px; }
+.page-imports .import-where { margin: 0; }
+
+.page-imports .main-inner > .card + .card,
+.page-imports .main-inner > .card + .notice,
+.page-imports .main-inner > .notice + .card,
+.page-imports .main-inner > .notice + .grid { margin-top: 16px; }
+.page-imports .run-stats { margin: 16px 0; }

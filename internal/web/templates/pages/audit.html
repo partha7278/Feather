@@ -1,14 +1,13 @@
 {{define "content"}}
 <div class="page-head">
   <div>
-    <h1>Activity</h1>
-    <p>Who changed what, and when. Rows marked <span class="badge warn">destructive</span> either
-      destroyed something or armed something that will.</p>
+    <h1>Audit log</h1>
+    <p>Who changed what, and when. Changes that destroyed something, or armed something that will, are marked <span class="badge warn">destructive</span>.</p>
   </div>
 </div>
 
-<div class="card">
-  <form method="get" action="/audit" class="filters">
+<div class="card flush">
+  <form method="get" action="/audit" class="filters toolbar audit-filters">
     <div class="field inline">
       <label for="action">Action</label>
       <select id="action" name="action">
@@ -20,50 +19,50 @@
     </div>
     <div class="field inline">
       <label for="actor">Who</label>
-      <input type="text" id="actor" name="actor" value="{{.Data.Filter.Actor}}" placeholder="email address">
+      <input type="text" id="actor" name="actor" value="{{.Data.Filter.Actor}}" placeholder="Email address">
     </div>
     <div class="field inline">
       <label for="target">What</label>
-      <input type="text" id="target" name="target" value="{{.Data.Filter.Target}}" placeholder="config or account name">
+      <input type="text" id="target" name="target" value="{{.Data.Filter.Target}}" placeholder="Config or account name">
     </div>
-    <button class="btn" type="submit">Filter</button>
-    <a class="btn ghost" href="/audit">Clear</a>
+    <div class="toolbar-buttons">
+      <button class="btn" type="submit">Filter</button>
+      {{if or .Data.Filter.Action .Data.Filter.Actor .Data.Filter.Target}}<a class="btn ghost" href="/audit">Clear</a>{{end}}
+    </div>
   </form>
-</div>
 
-<div class="card">
   {{if .Data.Events}}
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Audit log">
+    <table class="audit-table stack">
       <caption class="visually-hidden">Recorded changes, newest first</caption>
       <thead>
         <tr>
           <th scope="col">When</th>
-          <th scope="col">Who</th>
           <th scope="col">Action</th>
           <th scope="col">Target</th>
+          <th scope="col">Who</th>
           <th scope="col">Detail</th>
         </tr>
       </thead>
       <tbody>
       {{range .Data.Events}}
-        <tr>
-          <td class="small nowrap">{{datetime .At}}<div class="dim">{{since .At}}</div></td>
-          <td class="small break">
-            {{.Actor}}
-            {{if .ActorIP}}<div class="dim mono">{{.ActorIP}}</div>{{end}}
-          </td>
-          <td>
-            {{auditLabel .Action}}
+        <tr{{if .Destructive}} class="is-destructive"{{end}}>
+          <td class="nowrap when" data-label="When">{{datetime .At}}<div class="dim small">{{since .At}}</div></td>
+          <td class="what">
+            <span class="action-label">{{auditLabel .Action}}</span>
             {{if .Destructive}}<span class="badge warn">destructive</span>{{end}}
           </td>
-          <td class="small break">
+          <td class="target" data-label="Target">
             {{if .Target}}
               <span class="mono">{{.Target}}</span>
-              {{if .TargetKind}}<div class="dim">{{.TargetKind}}</div>{{end}}
-            {{else}}—{{end}}
+              {{if .TargetKind}}<div class="dim small">{{.TargetKind}}</div>{{end}}
+            {{else}}<span class="dim">—</span>{{end}}
           </td>
-          <td class="small dim break">{{if .Detail}}{{.Detail}}{{else}}—{{end}}</td>
+          <td class="who" data-label="Who">
+            <span class="actor">{{.Actor}}</span>
+            {{if .ActorIP}}<div class="dim small mono ip">{{.ActorIP}}</div>{{end}}
+          </td>
+          <td class="dim detail span" data-label="Detail">{{if .Detail}}{{.Detail}}{{else}}—{{end}}</td>
         </tr>
       {{end}}
       </tbody>
@@ -72,18 +71,31 @@
 
   {{if gt .Data.Pages 1}}
   <div class="pager">
+    <span>{{number .Data.Total}} events · page {{.Data.Page}} of {{.Data.Pages}}</span>
+    <span>
     {{if .Data.HasPrev}}
       <a class="btn small" href="/audit{{queryString "action" .Data.Filter.Action "actor" .Data.Filter.Actor "target" .Data.Filter.Target "page" (sub .Data.Page 1)}}">Previous</a>
     {{end}}
-    <span class="small dim">Page {{.Data.Page}} of {{.Data.Pages}} — {{number .Data.Total}} events</span>
     {{if .Data.HasNext}}
       <a class="btn small" href="/audit{{queryString "action" .Data.Filter.Action "actor" .Data.Filter.Actor "target" .Data.Filter.Target "page" (add .Data.Page 1)}}">Next</a>
     {{end}}
+    </span>
   </div>
   {{end}}
 
+  {{else if or .Data.Filter.Action .Data.Filter.Actor .Data.Filter.Target}}
+  <div class="empty">
+    <span class="empty-icon">{{template "icon-search"}}</span>
+    <h3>No changes match these filters</h3>
+    <p>Try a broader action, or part of an email address or name.</p>
+    <a class="btn" href="/audit">Clear filters</a>
+  </div>
   {{else}}
-  <p class="empty">Nothing recorded yet. Every change made from the panel appears here.</p>
+  <div class="empty">
+    <span class="empty-icon">{{template "icon-shield"}}</span>
+    <h3>Nothing recorded yet</h3>
+    <p>Every change made from the panel appears here, with who made it and when.</p>
+  </div>
   {{end}}
 </div>
 {{end}}

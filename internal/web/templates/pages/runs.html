@@ -2,64 +2,66 @@
 <div class="page-head">
   <div>
     <h1>Runs</h1>
-    <p>Every execution, scheduled or manual, with what it read, stored and deleted.</p>
+    <p>Every run, scheduled or started by hand, with what it read, stored and deleted.</p>
   </div>
   <div class="page-actions">
-    <form method="get" action="/runs">
-      <select name="config" onchange="this.form.submit()">
+    <form method="get" action="/runs" class="button-row">
+      <label class="visually-hidden" for="run-config">Config</label>
+      <select id="run-config" name="config" data-autosubmit>
         <option value="">All configs</option>
         {{range .Data.Jobs}}
           <option value="{{.Config.Name}}" {{if eq .Config.Name $.Data.ConfigName}}selected{{end}}>{{.Config.Name}}</option>
         {{end}}
       </select>
+      <button class="btn" type="submit" data-autosubmit-fallback>Filter</button>
     </form>
   </div>
 </div>
 
-<div class="card">
+<div class="card flush">
   {{if .Data.Runs}}
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Runs">
+    <table class="runs-table">
       <thead>
         <tr>
-          <th>Config</th><th>Status</th><th>Trigger</th><th>Started</th><th>Duration</th>
-          <th class="num">Scanned</th><th class="num">Archived</th><th class="num">Deleted</th>
-          <th class="num">Stored</th><th></th>
+          <th scope="col">Config</th><th scope="col">Status</th><th scope="col">Trigger</th><th scope="col">Started</th><th scope="col" class="num">Duration</th>
+          <th scope="col" class="num">Scanned</th><th scope="col" class="num">Archived</th><th scope="col" class="num">Deleted</th>
+          <th scope="col" class="num">Stored</th>
         </tr>
       </thead>
       <tbody>
       {{range .Data.Runs}}
-        <tr>
-          <td>
-            {{.ConfigName}}
-            {{if .DryRun}}<span class="badge muted">dry run</span>{{end}}
+        <tr{{if .Error}} class="has-error"{{end}}>
+          <td class="first">
+            <a href="/runs/{{.RunID}}" aria-label="{{.ConfigName}}, run started {{datetime .StartedAt}}">{{.ConfigName}}</a>
+            {{if and .DryRun (ne (print .Status) "dry_run")}}<span class="badge muted">dry run</span>{{end}}
+            {{if .Error}}<div class="row-error" title="{{.Error}}">{{truncate 400 .Error}}</div>{{end}}
           </td>
-          <td><span class="badge {{statusTone .Status}}">{{.Status}}</span></td>
-          <td class="small dim">{{.Trigger}}</td>
-          <td class="small nowrap">{{datetime .StartedAt}}<div class="dim">{{since .StartedAt}}</div></td>
-          <td class="small nowrap dim">{{duration .Duration}}</td>
-          <td class="num">{{number .DocsScanned}}</td>
-          <td class="num">{{number .DocsArchived}}</td>
-          <td class="num">{{if .DocsDeleted}}{{number .DocsDeleted}}{{else}}<span class="dim">0</span>{{end}}</td>
-          <td class="num">{{bytes .BytesStored}}</td>
-          <td class="actions"><a class="btn small" href="/runs/{{.RunID}}">Details</a></td>
+          <td>{{if eq (print .Status) "dry_run"}}<span class="badge muted">dry run</span>{{else}}<span class="badge {{statusTone .Status}}">{{.Status}}</span>{{end}}</td>
+          <td class="small dim nowrap">{{if eq (print .Trigger) "cron"}}Scheduled{{else if eq (print .Trigger) "ui"}}Control panel{{else if eq (print .Trigger) "manual"}}Command line{{else}}{{.Trigger}}{{end}}</td>
+          <td class="nowrap" title="{{since .StartedAt}}">{{datetime .StartedAt}}</td>
+          <td class="num dim">{{duration .Duration}}</td>
+          <td class="num{{if eq .DocsScanned 0}} zero{{end}}">{{number .DocsScanned}}</td>
+          <td class="num{{if eq .DocsArchived 0}} zero{{else if .DryRun}} dim{{end}}"{{if .DryRun}} title="Dry run: would archive {{number .DocsArchived}}"{{end}}>{{number .DocsArchived}}</td>
+          <td class="num{{if eq .DocsDeleted 0}} zero{{else}} deleted{{end}}">{{number .DocsDeleted}}</td>
+          {{if .DryRun}}<td class="num dim not-uploaded" title="Dry run: {{bytes .BytesStored}} compressed, nothing uploaded">not uploaded</td>{{else}}<td class="num{{if eq .BytesStored 0}} zero{{end}}">{{bytes .BytesStored}}</td>{{end}}
         </tr>
-        {{if .Error}}
-        <tr>
-          <td colspan="10" class="small" style="padding-top:0">
-            <span class="badge bad">error</span> <span class="dim break">{{truncate 400 .Error}}</span>
-          </td>
-        </tr>
-        {{end}}
       {{end}}
       </tbody>
     </table>
   </div>
   {{else}}
   <div class="empty">
+    <span class="empty-icon">{{template "icon-activity"}}</span>
+    {{if .Data.ConfigName}}
+    <h3>No runs for {{.Data.ConfigName}}</h3>
+    <p>This config has not run yet, or its history has been cleared.</p>
+    <a class="btn" href="/runs">Show all runs</a>
+    {{else}}
     <h3>Nothing has run yet</h3>
     <p>Runs appear here as soon as a schedule fires or you start one from a config.</p>
     <a class="btn" href="/configs">Go to retention configs</a>
+    {{end}}
   </div>
   {{end}}
 </div>

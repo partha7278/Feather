@@ -99,7 +99,7 @@ func (s *Server) handleMongoSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.audit(r, store.AuditSourceSaved, "mongo_source", record.Alias, "")
-	s.setFlash(w, "ok", "Saved the MongoDB account %q. Test it to confirm feather can reach it.", record.Alias)
+	s.setFlash(w, "ok", "Saved the MongoDB account %q. Test it to confirm Feather can reach it.", record.Alias)
 	http.Redirect(w, r, "/mongo", http.StatusSeeOther)
 }
 

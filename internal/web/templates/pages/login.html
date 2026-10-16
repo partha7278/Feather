@@ -1,9 +1,11 @@
 {{define "content"}}
-<div class="card">
-  <h2>Sign in</h2>
-  <p class="hint">Use the administrator account created when feather was set up.</p>
+<div class="card auth-card">
+  <header class="auth-head">
+    <h2 id="login-title">Sign in</h2>
+    <p class="hint">Use the administrator account created during setup.</p>
+  </header>
 
-  <form method="post" action="/login">
+  <form method="post" action="/login" class="auth-form" aria-labelledby="login-title">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="next" value="{{.Data.Next}}">
 
@@ -17,11 +19,11 @@
       <input type="password" id="password" name="password" required autocomplete="current-password">
     </div>
 
-    <button class="btn primary" type="submit" style="width:100%;justify-content:center">Sign in</button>
+    <button class="btn primary block" type="submit">Sign in</button>
   </form>
 </div>
 
-<p class="small dim" style="text-align:center">
-  Locked out? Run <code class="mono">feather reset-password &lt;email&gt;</code> on the server.
+<p class="small dim auth-foot">
+  Locked out? Run <code>feather reset-password &lt;email&gt;</code> on the server.
 </p>
 {{end}}

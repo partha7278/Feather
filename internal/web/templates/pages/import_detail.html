@@ -1,0 +1,105 @@
+{{define "content"}}
+{{$imp := .Data.Import}}
+{{$replace := eq $imp.Mode "replace"}}
+<div class="page-head">
+  <div>
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/imports">Imports</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">{{$imp.SourceLabel}}</span>
+    </nav>
+    <h1 class="break">{{$imp.SourceLabel}} <span class="badge {{statusTone $imp.Status}}">{{if eq (print $imp.Status) "dry_run"}}dry run{{else}}{{$imp.Status}}{{end}}</span></h1>
+    <dl class="run-meta">
+      <div><dt>Started</dt><dd>{{datetime $imp.StartedAt}} <span class="dim">· {{since $imp.StartedAt}}</span></dd></div>
+      <div><dt>{{if $imp.FinishedAt}}Took{{else}}Running for{{end}}</dt><dd class="tabular">{{duration $imp.Duration}}</dd></div>
+      <div><dt>By</dt><dd>{{$imp.Actor}}</dd></div>
+      <div><dt>Mode</dt><dd>{{if $replace}}replace by _id{{else}}add missing only{{end}}{{if $imp.DryRun}} · dry run{{end}}</dd></div>
+    </dl>
+  </div>
+</div>
+
+<div class="card">
+  <dl class="run-meta import-where">
+    <div><dt>Source</dt><dd class="break">{{if eq $imp.SourceKind "upload"}}uploaded file {{$imp.SourceLabel}}{{else}}{{$imp.SourceLabel}}{{if $imp.PreferAlias}} · read from {{$imp.PreferAlias}}{{end}}{{end}}</dd></div>
+    <div><dt>Target</dt><dd><span class="mono small">{{$imp.Target}}</span> on {{$imp.TargetAlias}}</dd></div>
+    <div><dt>Import ID</dt><dd class="mono run-id">{{$imp.ID}}</dd></div>
+  </dl>
+</div>
+
+{{if not $imp.FinishedAt}}
+<section class="card progress-panel" aria-labelledby="progress-title">
+  <div class="progress-head">
+    <h2 id="progress-title">{{if $imp.DryRun}}Reading{{else}}Importing{{end}} — file {{add $imp.FilesDone 1}} of {{$imp.FilesTotal}}</h2>
+    {{if or (gt $imp.DocsExpected 0) (gt $imp.BytesExpected 0)}}<span class="progress-pct" aria-hidden="true">{{$imp.Progress}}%</span>{{end}}
+  </div>
+  {{if or (gt $imp.DocsExpected 0) (gt $imp.BytesExpected 0)}}
+    <div class="progress" role="progressbar" aria-valuenow="{{$imp.Progress}}" aria-valuemin="0" aria-valuemax="100" aria-label="Import progress">
+      <div class="progress-bar" style="width:{{$imp.Progress}}%"></div>
+    </div>
+  {{end}}
+  <p class="hint">
+    {{if gt $imp.DocsExpected 0}}<strong class="tabular">{{number $imp.DocsRead}}</strong> of <span class="tabular">{{number $imp.DocsExpected}}</span> documents read
+    {{else}}<strong class="tabular">{{bytes $imp.BytesRead}}</strong> of <span class="tabular">{{bytes $imp.BytesExpected}}</span> read{{end}}
+    · this page refreshes every few seconds.
+  </p>
+</section>
+{{end}}
+
+{{if $imp.Error}}
+<div class="notice danger">
+  <strong>This import did not complete</strong>
+  <span class="break">{{$imp.Error}}</span>
+  {{if and (not $imp.DryRun) (gt $imp.DocsInserted 0)}}<span class="hint">Documents written before the failure stay where they are. Running the import again in “add missing only” mode completes it without duplicating them.</span>{{end}}
+</div>
+{{end}}
+
+<div class="grid stats strip run-stats">
+  <div class="stat"><div class="label">Read</div><div class="value{{if eq $imp.DocsRead 0}} zero{{end}}">{{number $imp.DocsRead}}</div><div class="sub">from {{$imp.FilesDone}} of {{$imp.FilesTotal}} file(s)</div></div>
+  <div class="stat"><div class="label">{{if $imp.DryRun}}Would write{{else}}Inserted{{end}}</div><div class="value{{if eq $imp.DocsInserted 0}} zero{{end}}">{{number $imp.DocsInserted}}</div><div class="sub">{{if $imp.DryRun}}nothing was written{{else}}new documents{{end}}</div></div>
+  <div class="stat"><div class="label">Already present</div><div class="value{{if eq $imp.DocsPresent 0}} zero{{end}}">{{number $imp.DocsPresent}}</div><div class="sub">left as they were</div></div>
+  {{if $replace}}<div class="stat{{if gt $imp.DocsReplaced 0}} warn{{end}}"><div class="label">Replaced</div><div class="value{{if eq $imp.DocsReplaced 0}} zero{{end}}">{{number $imp.DocsReplaced}}</div><div class="sub">overwritten by _id</div></div>{{end}}
+  <div class="stat"><div class="label">Bytes read</div><div class="value{{if eq $imp.BytesRead 0}} zero{{end}}">{{bytes $imp.BytesRead}}</div><div class="sub">as stored</div></div>
+</div>
+
+{{if $imp.FinishedAt}}
+<div class="card">
+  <h2>Checksum</h2>
+  {{if eq $imp.SourceKind "upload"}}
+    {{if $imp.SHA256}}<p class="hint">Uploaded files have no catalogue entry to check against. SHA-256 of the file as uploaded:</p>
+    <p class="mono small break">{{$imp.SHA256}}</p>{{else}}<p class="hint">The file was not read far enough to hash.</p>{{end}}
+  {{else if eq (print $imp.Status) "failed"}}
+    <p class="hint">Not confirmed — the import stopped before every file was checked. The reason is above.</p>
+  {{else}}
+    <p class="hint">Every file hashed to the SHA-256 the catalogue recorded, and held the number of documents it says.</p>
+    {{if $imp.SHA256}}<p class="mono small break">{{$imp.SHA256}}</p>{{end}}
+  {{end}}
+</div>
+{{end}}
+
+{{if .Data.CanRerun}}
+<div class="card">
+  <h2>Import for real</h2>
+  <p class="hint">Runs this import again with the same source, target and mode — and this time writes to {{$imp.Target}} on {{$imp.TargetAlias}}.</p>
+  <form method="post" action="/imports/{{$imp.ID}}/run" class="divided"
+        {{if $replace}}data-confirm="Replace documents in {{$imp.Target}}? Every document with a matching _id is overwritten with the archived version."{{end}}>
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    {{if .Data.LoopConfig}}
+    <div class="notice danger">
+      <strong>The config {{.Data.LoopConfig}} deletes from this collection</strong>
+      Imported documents that still match its filter will be deleted again on its next run.
+    </div>
+    <div class="field inline">
+      <input type="checkbox" id="acknowledge" name="acknowledge" value="1">
+      <label for="acknowledge">I understand, import into this collection anyway</label>
+    </div>
+    {{end}}
+    {{if $replace}}
+    <div class="field">
+      <label for="password">Your password</label>
+      <input type="password" id="password" name="password" required autocomplete="current-password" aria-describedby="password-hint">
+      <p class="hint" id="password-hint">This import replaces documents by _id. It is recorded in the audit log as destructive.</p>
+    </div>
+    {{end}}
+    <button class="btn primary" type="submit">{{template "icon-upload"}} Import for real</button>
+  </form>
+</div>
+{{end}}
+{{end}}

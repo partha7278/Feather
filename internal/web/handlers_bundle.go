@@ -11,10 +11,11 @@ import (
 	"github.com/unifers/feather/internal/store"
 )
 
-// maxBundleBytes bounds an uploaded bundle. A large installation is a few
-// hundred kilobytes of JSON; this leaves room to spare and still refuses to
+// maxBundleBytes bounds an uploaded bundle. The configuration alone is a few
+// hundred kilobytes of JSON; the execution log adds about a kilobyte per
+// archived file, so this leaves room for a long history and still refuses to
 // read an arbitrary file into memory.
-const maxBundleBytes = 8 << 20
+const maxBundleBytes = 64 << 20
 
 // handleSettingsExport writes the whole installation out as one file. Unless
 // the operator asks for a bundle without credentials, it is sealed under a
@@ -26,7 +27,16 @@ func (s *Server) handleSettingsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	withoutSecrets := f.Bool("withoutSecrets")
+	sections := chosenSections(f)
+	if sections.None() {
+		s.setFlash(w, "error", "Choose at least one thing to export.")
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	// Only accounts and destinations hold credentials; without them there is
+	// nothing for a passphrase to protect.
+	withoutSecrets := f.Bool("withoutSecrets") ||
+		(!sections.MongoSources && !sections.PostgresSources && !sections.Destinations)
 	passphrase := f.Raw("passphrase")
 
 	if !withoutSecrets {
@@ -45,6 +55,7 @@ func (s *Server) handleSettingsExport(w http.ResponseWriter, r *http.Request) {
 	exported, err := bundle.Export(r.Context(), s.app, bundle.ExportOptions{
 		Passphrase:     passphrase,
 		WithoutSecrets: withoutSecrets,
+		Sections:       sections,
 	})
 	if err != nil {
 		s.setFlash(w, "error", "%s", err.Error())
@@ -66,8 +77,10 @@ func (s *Server) handleSettingsExport(w http.ResponseWriter, r *http.Request) {
 		"by", currentUserEmail(r),
 		"with_credentials", exported.HasSecrets(),
 		"mongo_accounts", len(exported.MongoSources),
+		"postgres_accounts", len(exported.PostgresSources),
 		"destinations", len(exported.Destinations),
-		"configs", len(exported.Configs))
+		"configs", len(exported.Configs),
+		"runs", len(exported.Runs))
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+exported.FileName()+`"`)
@@ -101,6 +114,13 @@ func (s *Server) handleSettingsImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sections := chosenSections(f)
+	if sections.None() {
+		s.setFlash(w, "error", "Choose at least one thing to import.")
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+
 	incoming, err := bundle.Decode(data)
 	if err != nil {
 		s.setFlash(w, "error", "%s could not be read: %s", header.Filename, err)
@@ -111,7 +131,7 @@ func (s *Server) handleSettingsImport(w http.ResponseWriter, r *http.Request) {
 	result, err := incoming.Apply(r.Context(), s.app, bundle.ImportOptions{
 		Passphrase: f.Raw("passphrase"),
 		Overwrite:  f.Bool("overwrite"),
-		Settings:   f.Bool("importSettings"),
+		Sections:   sections,
 	})
 	if err != nil {
 		switch {
@@ -147,11 +167,34 @@ func (s *Server) handleSettingsImport(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
 
+// chosenSections reads the "include" checkboxes shared by the export and import
+// forms.
+func chosenSections(f *form) bundle.Sections {
+	var sections bundle.Sections
+	for _, part := range f.Strings("include") {
+		switch part {
+		case "mongoSources":
+			sections.MongoSources = true
+		case "postgresSources":
+			sections.PostgresSources = true
+		case "destinations":
+			sections.Destinations = true
+		case "configs":
+			sections.Configs = true
+		case "settings":
+			sections.Settings = true
+		case "runs":
+			sections.Runs = true
+		}
+	}
+	return sections
+}
+
 func firstFew(notes []string, limit int) []string {
 	if len(notes) <= limit {
 		return notes
 	}
-	return append(notes[:limit:limit], fmt.Sprintf("and %d more (see the feather log)", len(notes)-limit))
+	return append(notes[:limit:limit], fmt.Sprintf("and %d more (see the Feather log)", len(notes)-limit))
 }
 
 // limitBody caps a request before anything downstream reads it, including the

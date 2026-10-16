@@ -408,7 +408,11 @@ func (s *Store) Ping(ctx context.Context) error {
 func (s *Store) CheckMasterKey(ctx context.Context) error {
 	var sealed []byte
 	err := s.db.QueryRowContext(ctx,
-		`SELECT uri_enc FROM mongo_sources ORDER BY alias LIMIT 1`).Scan(&sealed)
+		`SELECT sealed FROM (
+			SELECT uri_enc AS sealed, alias FROM mongo_sources
+			UNION ALL
+			SELECT dsn_enc, alias FROM postgres_sources
+		) ORDER BY alias LIMIT 1`).Scan(&sealed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

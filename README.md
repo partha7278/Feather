@@ -1,22 +1,27 @@
-# feather
+# Feather
 
-MongoDB retention for a VPS, with a control panel. On a schedule, feather
-selects old documents by a condition you define, writes them out compressed to
-several cold-storage destinations at once, verifies every copy, and — if that
-config says so — deletes them from MongoDB. Every archive is catalogued, so
-"where did the January orders go?" is a page you can open rather than a guess.
+[![ci](https://github.com/partha7278/feather/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/partha7278/feather/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/partha7278/feather)](https://goreportcard.com/report/github.com/partha7278/feather)
+[![License](https://img.shields.io/github/license/partha7278/feather)](LICENSE)
+
+MongoDB and PostgreSQL retention for a VPS, with a control panel. On a
+schedule, feather selects old documents or rows by a condition you define,
+writes them out compressed to several cold-storage destinations at once,
+verifies every copy, and — if that config says so — deletes them from the
+source. Every archive is catalogued, so "where did the January orders go?" is a
+page you can open rather than a guess.
 
 - **One database.** Accounts, retention configs, the administrator login, and
   the catalogue of every file ever written all live in a single SQLite file.
-  `feather backup` writes a consistent snapshot of it while feather keeps
+  `feather backup` writes a consistent snapshot of it while Feather keeps
   running.
-- **A control panel.** Add MongoDB accounts and S3, Oracle or Google Drive
+- **A control panel.** Add MongoDB and PostgreSQL accounts and S3, Oracle or Google Drive
   destinations, write retention rules, watch runs, and browse every archive from
   the browser. Changes take effect without a restart.
-- **Many accounts.** Any number of MongoDB clusters and any number of S3, Oracle
-  Cloud and Google Drive accounts. Each config names the cluster it reads and
-  the destinations it writes; every destination gets a full copy.
-- **Deletion is a per-config switch.** Off, feather is a backup tool. On, it is
+- **Many accounts.** Any number of MongoDB clusters, PostgreSQL databases, and
+  S3, Oracle Cloud and Google Drive accounts. Each config names the database it
+  reads and the destinations it writes; every destination gets a full copy.
+- **Deletion is a per-config switch.** Off, Feather is a backup tool. On, it is
   a retention tool: the documents go once every copy is stored and verified.
 - **Encrypted credentials.** Connection strings and cloud secrets are sealed
   with AES-256-GCM under a master key held outside the database.
@@ -40,7 +45,7 @@ Or with Docker: `docker build -t feather .`
 feather serve
 ```
 
-That is the whole setup. On first start feather creates its database and master
+That is the whole setup. On first start Feather creates its database and master
 key under `/var/lib/feather` (or `./data` if that is not writable), then prints
 the control panel URL — `http://127.0.0.1:8477` by default.
 
@@ -50,7 +55,8 @@ reachable until you are signed in.
 
 From there:
 
-1. **MongoDB accounts** — add the cluster to archive from. Test the connection.
+1. **MongoDB or PostgreSQL accounts** — add the database to archive from. Test
+   the connection.
 2. **Destinations** — add an S3 bucket, an Oracle bucket, a Google Drive folder,
    or several. Test each.
 3. **Retention configs** — what to archive, where the copies go, when, and
@@ -85,7 +91,7 @@ it: those live in the database.
 
 Credentials are encrypted before they are written. The key comes from
 `FEATHER_MASTER_KEY` if set, otherwise from `FEATHER_DATA_DIR/master.key`,
-which feather generates with mode 0600 on first start.
+which Feather generates with mode 0600 on first start.
 
 ```bash
 feather keygen          # prints a key suitable for FEATHER_MASTER_KEY
@@ -93,6 +99,37 @@ feather keygen          # prints a key suitable for FEATHER_MASTER_KEY
 
 **Keep the key with your backups.** A copy of the database without it cannot be
 read, which is the point — and also means a restore needs both.
+
+**What is encrypted.** MongoDB and PostgreSQL connection strings and every cloud secret
+(S3 secret keys and session tokens, Google service-account JSON, OAuth client
+secrets and refresh tokens) are sealed with AES-256-GCM
+under the master key, each with its own random nonce, before they reach the
+database. Everything else — retention rules, the archive catalogue, the run
+history — is stored in the clear. Administrator passwords are bcrypt hashes and
+do not involve the key.
+
+**What the logs say about it.** On every start Feather logs where the key came
+from, so a swapped or regenerated key is visible before anything fails:
+
+```
+level=INFO msg="feather ready" database=/var/lib/feather/feather.db master_key=/var/lib/feather/master.key ...
+```
+
+`master_key` is `FEATHER_MASTER_KEY` when the key came from the environment, the
+file path when it was read from disk, and `<path> (newly generated)` on the
+first start — seeing that last one on a server that already had data means the
+old key is gone. A key file readable by group or other stops startup with the
+`chmod 600` to fix it, and `/readyz` returns 503 if the key in use cannot open
+what is already sealed.
+
+**Downloading the key.** **Settings → Storage → Download master key** saves it as
+`feather-master.key` after asking for your password again. It serves whichever
+key the running process uses — the environment value or the file. Every download
+is written to the audit log as `settings.master_key_downloaded`, with who, from
+which IP and the key's source, and logged at warning level as
+`master key downloaded`; a wrong password is logged as `master key download
+refused`. Store the file the way you store the backups, not next to them in the
+same unencrypted bucket.
 
 ## A retention config
 
@@ -111,6 +148,44 @@ and `$date` all work as written. The one addition is relative-time tokens:
 
 They resolve on every run, which is what makes "older than 90 days" keep
 meaning that. A token that is not recognised is an error, not a literal.
+
+**A PostgreSQL source** — the account, the schema (default `public`) and the
+table, and a filter written as the condition of a `WHERE` clause:
+
+```sql
+created_at < {{now-90d}} AND status IN ('closed', 'void')
+```
+
+A bare token becomes a typed literal, `TIMESTAMPTZ '2026-02-13T02:30:00.000Z'`;
+inside quotes, `'{{now-90d}}'`, it becomes just the timestamp text. Subqueries
+and functions work — it is real SQL, checked by PostgreSQL.
+
+The same condition guards every delete (`... WHERE id = ANY($1) AND (<filter>)`),
+so Feather refuses anything that could reach outside its parentheses: a `;`,
+`--` or `/* */` comments, `$` parameters or dollar quoting, `E'...'` strings,
+and unbalanced parentheses or quotes. It is checked when the config is saved
+and again immediately before each run touches the table.
+
+What a table needs, and why:
+
+- **A single-column primary key.** Rows are read in key order, a page at a time
+  (`WHERE key > last ORDER BY key LIMIT n`), not through a cursor held open for
+  the whole run — a transaction that lasts as long as an archive pins
+  PostgreSQL's xmin horizon, and autovacuum stops cleaning every table on the
+  server until it ends. The key is also what a run is fenced at and what rows
+  are deleted by. Tables with a composite key, or none, are refused with that
+  reason.
+- **PostgreSQL 12 or newer**, and an account with `SELECT` on the table —
+  plus `DELETE` if the config deletes.
+
+Each row is archived as `row_to_json`, PostgreSQL's own rendering of it, which
+`json_populate_record` reads back to the same values: timestamps keep their
+microseconds, numerics keep every digit, and arrays, `bytea`, `uuid`, `jsonb`
+and composite values survive the round trip. The one thing not kept byte for
+byte is insignificant whitespace inside a `json` (not `jsonb`) column, whose
+newlines become spaces so each row stays on one line. A projection is not
+offered: a partial row cannot be restored. The timestamp column is any column
+that casts to `timestamptz`, read as UTC.
 
 **Destinations** — one or more, of any kind. Each receives a complete copy, and
 no document is deleted until every copy is verified. Mixing providers is the
@@ -184,16 +259,16 @@ personal Google account, because it writes as a person and uses that person's
 storage.
 
 1. In the Google Cloud console, enable the **Google Drive API** for a project.
-2. Create an OAuth client of type **Web application**, and register feather's
+2. Create an OAuth client of type **Web application**, and register Feather's
    callback as an authorised redirect URI. The destination form prints the exact
    URI to paste; it is your panel's address plus
-   `/destinations/gdrive/callback`. Set `FEATHER_BASE_URL` when feather is
+   `/destinations/gdrive/callback`. Set `FEATHER_BASE_URL` when Feather is
    behind a reverse proxy, so the URI it prints is the one Google will be
    handed.
 3. Paste the client ID and secret into the destination and save it. The account
    is stored, but nothing can write to it yet.
 4. Press **Connect Google Drive**. Google asks for offline access to Drive and
-   sends you back; feather keeps the refresh token, sealed like every other
+   sends you back; Feather keeps the refresh token, sealed like every other
    credential, and renews its own access from then on.
 
 Disconnecting forgets that token. The account and its folder stay, so
@@ -207,7 +282,7 @@ a quota error. Paste the whole downloaded JSON key file into the destination.
 With Workspace domain-wide delegation, the **Impersonate** field names the user
 to act as.
 
-Verification works as it does everywhere else: after the upload, feather re-reads
+Verification works as it does everywhere else: after the upload, Feather re-reads
 the file and compares its size and SHA-256 — including the checksum Drive
 computes itself, which is an end-to-end check of what actually landed.
 
@@ -222,7 +297,7 @@ feather run <config> [--dry-run]
 feather validate                 # check accounts, configs, connectivity; print matched counts
 feather verify <run|archive|config>      # re-read stored archives, confirm they are intact
 feather restore <run|archive|config> [--into db.coll] [--dry-run]
-feather backup <file>            # consistent snapshot of feather's own database
+feather backup <file>            # consistent snapshot of Feather's own database
 feather list                     # configs, schedules, last run status
 feather export <file>            # every account, config and setting, as one file
 feather import-bundle <file>     # read one back in
@@ -236,10 +311,10 @@ Always `validate` and then `--dry-run` before the first real run of a config
 that deletes. A dry run reads and compresses everything, reports exactly what it
 would upload and delete, and touches neither the destinations nor MongoDB.
 
-## Backing feather up
+## Backing Feather up
 
-feather's own state — the catalogue, the administrator logins, the sealed
-credentials — is one SQLite file. Copying that file while feather is running is
+Feather's own state — the catalogue, the administrator logins, the sealed
+credentials — is one SQLite file. Copying that file while Feather is running is
 **not** a backup: it is written ahead of itself in WAL mode, so a plain `cp`
 captures a torn state missing the most recent transactions.
 
@@ -247,9 +322,8 @@ captures a torn state missing the most recent transactions.
 feather backup /var/backups/feather-$(date -u +%Y%m%dT%H%M%SZ).db
 ```
 
-That takes a consistent snapshot through a transaction, so feather can keep
-archiving while it runs. The same thing is a button under **Settings → Backup**.
-An existing file is never overwritten.
+That takes a consistent snapshot through a transaction, so Feather can keep
+archiving while it runs. An existing file is never overwritten.
 
 **The snapshot needs the master key to be read.** Keep a copy of the key
 wherever you keep the backups; a restore needs both. Restoring is putting the
@@ -263,7 +337,7 @@ configuration and deliberately carries neither the catalogue nor the logins.
 ## Moving an installation
 
 Every MongoDB account, every destination, every retention config and the
-instance settings can be written out as one file and read into another feather —
+instance settings can be written out as one file and read into another Feather —
 from **Settings → Export & import** in the panel, or from the command line.
 
 ```bash
@@ -362,6 +436,15 @@ feather restore <run id>               # put the documents back where they came 
 feather restore <run id> --into shop.orders_recovered
 ```
 
+PostgreSQL archives go back into the table they came from, through the account
+their config reads, or into another with `--into schema.table` — which must
+already exist with compatible columns, for example one made with
+`CREATE TABLE sales.orders_recovered (LIKE sales.orders INCLUDING ALL)`. Rows
+whose key is already present are counted and left alone. Generated columns are
+recomputed rather than written, and an identity key goes back as it was
+(`OVERRIDING SYSTEM VALUE`). The control panel's **Imports** write into MongoDB
+only; a PostgreSQL archive is restored from the command line.
+
 A restore reads each archive back, hashes it as it goes, and refuses to write
 anything if the digest does not match what the catalogue recorded — so a copy
 that has rotted, been overwritten, or been expired by a lifecycle rule fails
@@ -403,14 +486,71 @@ gunzip -c orders-archive-20260514T023000Z-00001.ndjson.gz \
 
 For zstd archives, use `zstd -dc` in place of `gunzip -c`.
 
+A PostgreSQL archive is one `row_to_json` object per line. `psql` can load it
+through a staging table — the `csv` options stop `COPY` from treating
+backslashes and quotes in the JSON as its own escapes:
+
+```bash
+gunzip -c orders-pg-….ndjson.gz | psql "$DSN" -c "
+  CREATE TEMP TABLE feather_load (row json);
+  COPY feather_load FROM STDIN WITH (FORMAT csv, QUOTE e'\x01', DELIMITER e'\x02');
+  INSERT INTO sales.orders OVERRIDING SYSTEM VALUE
+    SELECT (json_populate_record(NULL::sales.orders, row)).* FROM feather_load
+    ON CONFLICT DO NOTHING;"
+```
+
+Leave generated columns out of that insert by naming the columns, or use
+`feather restore`, which does.
+
 A copy in Google Drive is a file like any other: open the folder in a browser
 and download it, or fetch it by the Drive file ID the catalogue recorded against
 that copy. What comes down is byte-for-byte what went up, so the same two
 commands finish the restore.
 
+## Importing archives
+
+The control panel can do what `feather restore` does without a shell. Open
+**Imports** in the sidebar, or start from the file you want:
+
+- **Backups → Import into MongoDB** on any archive's row imports that one file.
+- **Import this run** on a finished run's page imports every archive it wrote,
+  oldest batch first.
+- **Imports → New import** uploads a file from your computer instead: NDJSON in
+  canonical or relaxed Extended JSON (what `mongoexport` writes), as `.ndjson`,
+  `.jsonl` or `.json`, plain or compressed as `.gz` or `.zst`, up to 256 MiB.
+
+The defaults are the safe choice. For a catalogued archive the form fills in the
+MongoDB account its config reads through, the database it came from, and a new
+collection, `<collection>_restored_<YYYYMMDD>`, so accepting them never writes
+into live data. The account needs write access (`readWrite`) to the database
+you choose.
+
+Every import is one of two modes:
+
+- **Add missing documents only** (the default). A document whose `_id` is
+  already there is left alone and counted as already present, so running the
+  same import twice changes nothing the second time.
+- **Replace documents with the same _id.** The archived version overwrites what
+  is there now. Feather asks for your password again before a real replace, and
+  records it in the audit log as destructive.
+
+Nothing is ever dropped or deleted. **Dry run** reads every file, checks each
+archive's SHA-256 and document count against the catalogue, and writes nothing.
+A finished dry run of a catalogued archive offers **Import for real** with the
+same settings. If the target collection is one an enabled config archives and
+deletes from, the form says so and asks you to confirm: documents that still
+match the config's filter are deleted again on its next run.
+
+One import runs at a time. Its page shows progress while it runs and the final
+counts (read, inserted, already present, replaced) when it finishes, and the
+start and the outcome both go to the audit log. There is no cancel button: an
+import interrupted by a restart is marked failed, and running it again in
+"add missing" mode picks up where it stopped without duplicating anything.
+
 ## Verifying locally
 
-A rig with MongoDB and MinIO standing in for the object stores:
+A rig with MongoDB, PostgreSQL (on port 5433) and MinIO standing in for the
+object stores:
 
 ```bash
 make rig-up
@@ -436,7 +576,7 @@ Three endpoints, none of which need a session:
 
 | Endpoint | Answers |
 |---|---|
-| `/livez` | Is the process up? Touches nothing, so a busy database cannot get feather restarted. |
+| `/livez` | Is the process up? Touches nothing, so a busy database cannot get Feather restarted. |
 | `/readyz` | Can it work? Checks the database answers and the master key opens what is sealed with it. 503 when not. |
 | `/metrics` | Prometheus text format. |
 
@@ -460,7 +600,7 @@ as age zero, which would read as "just succeeded". Alongside it are
 longer parses and is not running at all), `feather_config_deletes_source`, and
 the usual totals for documents archived, documents deleted and bytes stored.
 
-**Notifications.** Set a webhook under Settings and feather POSTs one JSON object
+**Notifications.** Set a webhook under Settings and Feather POSTs one JSON object
 when a run fails. Credentials are stripped from the message on the way out, dry
 runs never notify, and a webhook that is down or slow is logged and ignored —
 the thing that reports outages must not be able to cause them. Tick *notify on
@@ -483,7 +623,7 @@ success* if you would rather have a heartbeat than silence.
   which is what you need to find a copy again, and `location_url` reads
   `gdrive://<folder>/<path>`.
 - Google Drive is asked for full Drive access rather than the narrower
-  `drive.file` scope, because that scope cannot see a folder feather did not
+  `drive.file` scope, because that scope cannot see a folder Feather did not
   create — including the one you point it at.
 - An empty filter combined with deletion is rejected — that combination would
   archive and then empty the whole collection.

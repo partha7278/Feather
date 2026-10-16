@@ -1,4 +1,8 @@
-FROM golang:1.26-alpine AS build
+# Build on the runner's native platform and cross-compile for the target, so a
+# multi-arch build does not run the Go compiler under QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -13,7 +17,7 @@ ARG COMMIT=unknown
 ARG DATE=unknown
 
 # Static binary so the runtime image needs no libc.
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w \
       -X github.com/unifers/feather/internal/buildinfo.version=${VERSION} \
       -X github.com/unifers/feather/internal/buildinfo.commit=${COMMIT} \

@@ -2,54 +2,61 @@
 <div class="page-head">
   <div>
     <h1>MongoDB accounts</h1>
-    <p>The clusters feather reads from. Connection strings are encrypted before they are stored, and are never shown again once saved.</p>
+    <p>The clusters Feather reads from; connection strings are encrypted and never shown again.</p>
   </div>
+  {{if .Data.Sources}}
   <div class="page-actions">
-    <a class="btn primary" href="/mongo/new">{{template "icon-plus"}} Add account</a>
+    <a class="btn primary" href="/mongo/new">{{template "icon-plus"}} Add MongoDB account</a>
   </div>
+  {{end}}
 </div>
 
-<div class="card">
+<div class="card flush">
   {{if .Data.Sources}}
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="MongoDB accounts">
+    <table class="align-top acct-table stack">
       <thead>
-        <tr><th>Alias</th><th>Connection</th><th>Auth source</th><th>Last test</th><th>Used by</th><th></th></tr>
+        <tr><th scope="col">MongoDB account</th><th scope="col">Connection</th><th scope="col">Last test</th><th scope="col">Used by</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
       </thead>
       <tbody>
       {{range .Data.Sources}}
         <tr>
-          <td>
-            <a href="/mongo/{{.ID}}"><strong>{{.Alias}}</strong></a>
-            {{if not .Enabled}}<span class="badge muted">disabled</span>{{end}}
-            {{if .Note}}<div class="small dim">{{.Note}}</div>{{end}}
+          <td class="first">
+            <a href="/mongo/{{.ID}}">{{.Alias}}</a>{{if not .Enabled}}<span class="badge muted">disabled</span>{{end}}
+            {{if .Note}}<div class="small dim clamp" title="{{.Note}}">{{.Note}}</div>{{end}}
           </td>
-          <td class="mono small break">{{.Preview}}</td>
-          <td class="small dim">{{.AuthSource}}</td>
-          <td class="small">
+          <td class="acct-where span" data-label="Connection">
+            <span class="mono acct-truncate" title="{{.Preview}}">{{.Preview}}</span>
+            <div class="small dim">Auth source <span class="mono">{{.AuthSource}}</span></div>
+          </td>
+          <td class="small acct-check" data-label="Last test">
             {{if .Check.Tested}}
-              {{if .Check.OK}}<span class="badge good">reachable</span>
-              {{else}}<span class="badge bad">failed</span>{{end}}
-              <div class="dim small">{{since .Check.At}}</div>
-              {{if .Check.Error}}<div class="dim small break">{{truncate 140 .Check.Error}}</div>{{end}}
+              <span class="status-dot {{if .Check.OK}}good{{else}}bad{{end}}">{{if .Check.OK}}Reachable{{else}}Failed{{end}}</span> <span class="dim">· {{since .Check.At}}</span>
+              {{if .Check.Error}}<div class="dim clamp" title="{{.Check.Error}}">{{truncate 140 .Check.Error}}</div>{{end}}
             {{else}}
-              <span class="badge muted">not tested</span>
+              <span class="status-dot muted">Not tested</span>
             {{end}}
           </td>
-          <td class="small dim">
+          <td class="small acct-used" data-label="Used by">
             {{$used := index $.Data.UsedBy .Alias}}
-            {{if $used}}{{range $i, $name := $used}}{{if $i}}, {{end}}{{$name}}{{end}}{{else}}—{{end}}
+            {{if $used}}{{range $i, $name := $used}}{{if $i}}, {{end}}{{$name}}{{end}}{{else}}<span class="dim acct-unused">Not used</span>{{end}}
           </td>
           <td class="actions">
             <form method="post" action="/mongo/{{.ID}}/test">
               <input type="hidden" name="csrf" value="{{$.CSRF}}">
               <button class="btn small" type="submit">Test</button>
             </form>
-            <a class="btn small" href="/mongo/{{.ID}}">Edit</a>
-            <form method="post" action="/mongo/{{.ID}}/delete" data-confirm="Remove the MongoDB account {{.Alias}}?">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <button class="btn small danger" type="submit">Remove</button>
-            </form>
+            <details class="row-menu">
+              <summary class="btn small ghost icon-only" aria-label="More actions for {{.Alias}}" title="More actions">{{template "icon-more"}}</summary>
+              <div class="menu" role="menu">
+                <a class="menu-item" href="/mongo/{{.ID}}" role="menuitem">{{template "icon-pencil"}}Edit</a>
+                <div class="menu-sep" role="separator"></div>
+                <form method="post" action="/mongo/{{.ID}}/delete" data-confirm="Remove the MongoDB account {{.Alias}}?">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <button class="menu-item danger" type="submit" role="menuitem">{{template "icon-trash"}}Remove</button>
+                </form>
+              </div>
+            </details>
           </td>
         </tr>
       {{end}}
@@ -58,9 +65,10 @@
   </div>
   {{else}}
   <div class="empty">
+    <span class="empty-icon">{{template "icon-database"}}</span>
     <h3>No MongoDB accounts yet</h3>
-    <p>Add the connection string for the cluster you want to archive from. You can add more later — each retention config names the account it reads.</p>
-    <a class="btn primary" href="/mongo/new">Add the first account</a>
+    <p>Add the cluster you want to archive from. Each retention config names the MongoDB account it reads.</p>
+    <a class="btn primary" href="/mongo/new">{{template "icon-plus"}} Add MongoDB account</a>
   </div>
   {{end}}
 </div>

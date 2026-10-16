@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
@@ -161,6 +162,20 @@ func isMissing(err error) bool {
 	return false
 }
 
+// Mode decides what happens to a document whose _id is already in the target
+// collection.
+type Mode string
+
+const (
+	// ModeInsert leaves the existing document alone and counts it as already
+	// present. It is the zero value, so every caller that does not ask for
+	// anything else gets the restore that cannot overwrite.
+	ModeInsert Mode = ""
+	// ModeReplace overwrites the existing document with the archived one,
+	// matched by _id. A document with no _id is inserted.
+	ModeReplace Mode = "replace"
+)
+
 // Options configures a restore.
 type Options struct {
 	// DryRun reads and decodes the archive, and reports what it would insert,
@@ -173,6 +188,14 @@ type Options struct {
 	// PreferAlias names the destination to read from. Empty means the first
 	// copy that can be read.
 	PreferAlias string
+
+	// Mode is insert-only unless set otherwise.
+	Mode Mode
+
+	// Progress, when set, is called after every batch with the counts so far.
+	// It runs on the restoring goroutine, so it should be quick — the caller
+	// that writes progress to the database throttles itself.
+	Progress func(Result)
 }
 
 // Result summarises a restore.
@@ -182,8 +205,15 @@ type Result struct {
 	DocumentsRead  int64
 	Inserted       int64
 	AlreadyPresent int64
-	DryRun         bool
-	Duration       time.Duration
+	// Replaced counts documents that were already there and were overwritten.
+	// Always 0 outside ModeReplace.
+	Replaced int64
+	// BytesRead and SHA256 describe the stored bytes as they were read —
+	// compressed, exactly as the archive sits in the bucket or on disk.
+	BytesRead int64
+	SHA256    string
+	DryRun    bool
+	Duration  time.Duration
 }
 
 const defaultRestoreBatch = 1000
@@ -202,8 +232,81 @@ const defaultRestoreBatch = 1000
 func Artifact(ctx context.Context, log *slog.Logger, registry Registry, into *mongo.Collection,
 	artifact store.Artifact, copies []store.ArtifactDestination, opts Options) (Result, error) {
 
+	if into == nil && !opts.DryRun {
+		return Result{Artifact: artifact, DryRun: opts.DryRun}, errors.New("no target collection given")
+	}
+	return restoreArtifact(ctx, registry, artifact, copies, opts, func(r io.Reader) (Result, error) {
+		return Stream(ctx, log, into, r, codecFor(artifact), opts)
+	})
+}
+
+// TableArtifact restores one archive of a PostgreSQL table, with the same
+// copy selection and the same digest and count checks as Artifact.
+func TableArtifact(ctx context.Context, log *slog.Logger, registry Registry, into TableWriter,
+	artifact store.Artifact, copies []store.ArtifactDestination, opts Options) (Result, error) {
+
+	if into == nil && !opts.DryRun {
+		return Result{Artifact: artifact, DryRun: opts.DryRun}, errors.New("no target table given")
+	}
+	return restoreArtifact(ctx, registry, artifact, copies, opts, func(r io.Reader) (Result, error) {
+		return StreamTable(ctx, log, into, r, codecFor(artifact), opts)
+	})
+}
+
+// restoreArtifact is what Artifact and TableArtifact share: find a readable
+// copy, stream it into the target, and then hold what was read to what the
+// catalogue says was written.
+func restoreArtifact(ctx context.Context, registry Registry, artifact store.Artifact,
+	copies []store.ArtifactDestination, opts Options, stream func(io.Reader) (Result, error)) (Result, error) {
+
 	started := time.Now()
 	result := Result{Artifact: artifact, DryRun: opts.DryRun}
+
+	source, target, err := openCopy(ctx, registry, artifact, copies, opts.PreferAlias)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = source.Close() }()
+
+	streamed, err := stream(source)
+	streamed.Artifact, streamed.ReadFrom = artifact, target
+	result = streamed
+	if err != nil {
+		return result, err
+	}
+
+	// Checked last, and it still fails the restore. Documents inserted before
+	// the mismatch was detectable stay — they are the operator's data, and
+	// removing them again on the way out would be worse than leaving them.
+	if artifact.SHA256 != "" && !strings.EqualFold(result.SHA256, artifact.SHA256) {
+		return result, fmt.Errorf(
+			"the archive read from %s hashes to %s but the catalogue records %s — this copy is not the archive it claims to be; "+
+				"%d documents were read and %d inserted before this was detectable",
+			target, result.SHA256, artifact.SHA256, result.DocumentsRead, result.Inserted)
+	}
+	if artifact.DocCount > 0 && result.DocumentsRead != artifact.DocCount {
+		return result, fmt.Errorf("the archive holds %d documents but the catalogue records %d",
+			result.DocumentsRead, artifact.DocCount)
+	}
+
+	result.Duration = time.Since(started)
+	return result, nil
+}
+
+// Stream restores one archive from r, which must be the stored bytes exactly
+// as they were written — compressed with codec, or plain NDJSON for
+// archive.CodecNone. It is the part of Artifact that does not care where the
+// bytes came from, so an uploaded file goes through the same decoding, batching
+// and duplicate handling as a catalogued one.
+//
+// It checks nothing against a catalogue: there may not be one. The digest and
+// size of what was read come back in the Result for the caller to compare, or
+// simply to record.
+func Stream(ctx context.Context, log *slog.Logger, into *mongo.Collection, r io.Reader,
+	codec string, opts Options) (result Result, err error) {
+
+	started := time.Now()
+	result = Result{DryRun: opts.DryRun}
 
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = defaultRestoreBatch
@@ -212,28 +315,44 @@ func Artifact(ctx context.Context, log *slog.Logger, registry Registry, into *mo
 		return result, errors.New("no target collection given")
 	}
 
-	source, target, err := openCopy(ctx, registry, artifact, copies, opts.PreferAlias)
-	if err != nil {
-		return result, err
-	}
-	defer func() { _ = source.Close() }()
-	result.ReadFrom = target
-
-	reader, err := archive.NewDocumentReader(source, codecFor(artifact))
+	reader, err := archive.NewDocumentReader(r, codec)
 	if err != nil {
 		return result, err
 	}
 	defer func() { _ = reader.Close() }()
+
+	// Kept current on every return, so a caller recording a failure still
+	// sees how far the restore got and what it had hashed.
+	snapshot := func() {
+		result.BytesRead = reader.CompressedBytes()
+		result.SHA256 = reader.SHA256()
+		result.Duration = time.Since(started)
+	}
+	defer snapshot()
 
 	batch := make([]any, 0, opts.BatchSize)
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
-		inserted, duplicates, err := insertBatch(ctx, log, into, batch, opts.DryRun)
-		result.Inserted += inserted
-		result.AlreadyPresent += duplicates
+		var err error
+		if opts.Mode == ModeReplace {
+			var inserted, replaced, duplicates int64
+			inserted, replaced, duplicates, err = replaceBatch(ctx, log, into, batch, opts.DryRun)
+			result.Inserted += inserted
+			result.Replaced += replaced
+			result.AlreadyPresent += duplicates
+		} else {
+			var inserted, duplicates int64
+			inserted, duplicates, err = insertBatch(ctx, log, into, batch, opts.DryRun)
+			result.Inserted += inserted
+			result.AlreadyPresent += duplicates
+		}
 		batch = batch[:0]
+		if opts.Progress != nil {
+			snapshot()
+			opts.Progress(result)
+		}
 		return err
 	}
 
@@ -262,22 +381,92 @@ func Artifact(ctx context.Context, log *slog.Logger, registry Registry, into *mo
 	if err := reader.Drain(); err != nil {
 		return result, fmt.Errorf("reading the rest of the archive: %w", err)
 	}
+	return result, nil
+}
 
-	// Checked last, and it still fails the restore. Documents inserted before
-	// the mismatch was detectable stay — they are the operator's data, and
-	// removing them again on the way out would be worse than leaving them.
-	if artifact.SHA256 != "" && !strings.EqualFold(reader.SHA256(), artifact.SHA256) {
-		return result, fmt.Errorf(
-			"the archive read from %s hashes to %s but the catalogue records %s — this copy is not the archive it claims to be; "+
-				"%d documents were read and %d inserted before this was detectable",
-			target, reader.SHA256(), artifact.SHA256, result.DocumentsRead, result.Inserted)
+// TableWriter is where StreamTable puts rows: a PostgreSQL table, in practice
+// a *pgsrc.Writer. It is an interface so this package needs no database driver
+// to be tested.
+type TableWriter interface {
+	WriteRows(ctx context.Context, lines [][]byte, replace, dryRun bool) (inserted, replaced, present int64, err error)
+}
+
+// StreamTable is Stream for a PostgreSQL archive: each line is a row as
+// row_to_json wrote it, handed to the table writer undecoded.
+func StreamTable(ctx context.Context, log *slog.Logger, into TableWriter, r io.Reader,
+	codec string, opts Options) (result Result, err error) {
+
+	started := time.Now()
+	result = Result{DryRun: opts.DryRun}
+
+	if opts.BatchSize <= 0 {
+		opts.BatchSize = defaultRestoreBatch
 	}
-	if artifact.DocCount > 0 && result.DocumentsRead != artifact.DocCount {
-		return result, fmt.Errorf("the archive holds %d documents but the catalogue records %d",
-			result.DocumentsRead, artifact.DocCount)
+	if into == nil && !opts.DryRun {
+		return result, errors.New("no target table given")
 	}
 
-	result.Duration = time.Since(started)
+	reader, err := archive.NewDocumentReader(r, codec)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = reader.Close() }()
+
+	snapshot := func() {
+		result.BytesRead = reader.CompressedBytes()
+		result.SHA256 = reader.SHA256()
+		result.Duration = time.Since(started)
+	}
+	defer snapshot()
+
+	batch := make([][]byte, 0, opts.BatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		var (
+			inserted, replaced, present int64
+			err                         error
+		)
+		if into != nil {
+			inserted, replaced, present, err = into.WriteRows(ctx, batch, opts.Mode == ModeReplace, opts.DryRun)
+		}
+		result.Inserted += inserted
+		result.Replaced += replaced
+		result.AlreadyPresent += present
+		if present > 0 {
+			log.Debug("rows already present were left alone", "count", present)
+		}
+		batch = batch[:0]
+		if opts.Progress != nil {
+			snapshot()
+			opts.Progress(result)
+		}
+		return err
+	}
+
+	for {
+		line, ok := reader.NextLine()
+		if !ok {
+			break
+		}
+		result.DocumentsRead++
+		batch = append(batch, line)
+		if len(batch) >= opts.BatchSize {
+			if err := flush(); err != nil {
+				return result, err
+			}
+		}
+	}
+	if err := reader.Err(); err != nil {
+		return result, err
+	}
+	if err := flush(); err != nil {
+		return result, err
+	}
+	if err := reader.Drain(); err != nil {
+		return result, fmt.Errorf("reading the rest of the archive: %w", err)
+	}
 	return result, nil
 }
 
@@ -369,6 +558,61 @@ func insertBatch(ctx context.Context, log *slog.Logger, into *mongo.Collection, 
 		return insertErr
 	})
 	return inserted, duplicates, err
+}
+
+// replaceBatch writes one batch in ModeReplace: each document overwrites the
+// one with the same _id, or is added if there is none.
+//
+// Unordered for the same reason as insertBatch, and an upsert that loses a
+// race to a concurrent insert of the same _id is counted as already present
+// rather than failing the batch.
+func replaceBatch(ctx context.Context, log *slog.Logger, into *mongo.Collection, batch []any, dryRun bool) (inserted, replaced, duplicates int64, err error) {
+	if dryRun {
+		return int64(len(batch)), 0, 0, nil
+	}
+
+	models := make([]mongo.WriteModel, 0, len(batch))
+	for _, item := range batch {
+		doc := item.(bson.Raw)
+		id, lookupErr := doc.LookupErr("_id")
+		if lookupErr != nil {
+			models = append(models, mongo.NewInsertOneModel().SetDocument(doc))
+			continue
+		}
+		models = append(models, mongo.NewReplaceOneModel().
+			SetFilter(bson.D{{Key: "_id", Value: id}}).
+			SetReplacement(doc).
+			SetUpsert(true))
+	}
+
+	err = retry.Do(ctx, log, retry.DefaultPolicy, "restore batch", func(ctx context.Context) error {
+		// Counted per attempt: a retried batch is the whole batch again.
+		inserted, replaced, duplicates = 0, 0, 0
+		result, writeErr := into.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+		if result != nil {
+			inserted = result.InsertedCount + result.UpsertedCount
+			replaced = result.MatchedCount
+		}
+		if writeErr == nil {
+			return nil
+		}
+		var bulk mongo.BulkWriteException
+		if errors.As(writeErr, &bulk) {
+			remaining := 0
+			for _, failure := range bulk.WriteErrors {
+				if failure.Code == duplicateKeyCode {
+					duplicates++
+					continue
+				}
+				remaining++
+			}
+			if remaining == 0 {
+				return nil
+			}
+		}
+		return writeErr
+	})
+	return inserted, replaced, duplicates, err
 }
 
 // duplicateKeyCode is MongoDB's E11000.

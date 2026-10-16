@@ -1,0 +1,65 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Imports</h1>
+    <p>Archived documents put back into MongoDB, newest first. Start one from a file in <a href="/backups">Backups</a>, or upload a file.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn primary" href="/imports/new">{{template "icon-upload"}} New import</a>
+  </div>
+</div>
+
+{{if .Data.Busy}}
+<div class="notice info">
+  <strong>An import is running</strong>
+  One import runs at a time. A new one can start when it finishes.
+</div>
+{{end}}
+
+<div class="card flush">
+  {{if .Data.Imports}}
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Imports">
+    <table class="runs-table imports-table">
+      <thead>
+        <tr>
+          <th scope="col">Source</th><th scope="col">Status</th><th scope="col">Target</th><th scope="col">Started</th>
+          <th scope="col" class="num">Duration</th><th scope="col" class="num">Read</th><th scope="col" class="num">Inserted</th>
+          <th scope="col" class="num">Already present</th><th scope="col" class="num">Replaced</th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Data.Imports}}
+        <tr{{if .Error}} class="has-error"{{end}}>
+          <td class="first">
+            <a href="/imports/{{.ID}}" aria-label="{{.SourceLabel}}, import started {{datetime .StartedAt}}">{{.SourceLabel}}</a>
+            {{if eq .SourceKind "upload"}}<span class="badge muted">upload</span>{{end}}
+            {{if and .DryRun (ne (print .Status) "dry_run")}}<span class="badge muted">dry run</span>{{end}}
+            {{if eq .Mode "replace"}}<span class="badge warn">replace</span>{{end}}
+            {{if .Error}}<div class="row-error" title="{{.Error}}">{{truncate 400 .Error}}</div>{{end}}
+          </td>
+          <td><span class="badge {{statusTone .Status}}">{{if eq (print .Status) "dry_run"}}dry run{{else}}{{.Status}}{{end}}</span></td>
+          <td class="nowrap">{{.Target}}<div class="dim small">on {{.TargetAlias}} · by {{.Actor}}</div></td>
+          <td class="nowrap" title="{{since .StartedAt}}">{{datetime .StartedAt}}</td>
+          <td class="num dim">{{duration .Duration}}</td>
+          <td class="num{{if eq .DocsRead 0}} zero{{end}}">{{number .DocsRead}}</td>
+          <td class="num{{if eq .DocsInserted 0}} zero{{end}}">{{number .DocsInserted}}</td>
+          <td class="num{{if eq .DocsPresent 0}} zero{{end}}">{{number .DocsPresent}}</td>
+          <td class="num{{if eq .DocsReplaced 0}} zero{{end}}">{{number .DocsReplaced}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty">
+    <span class="empty-icon">{{template "icon-upload"}}</span>
+    <h3>Nothing has been imported yet</h3>
+    <p>Pick an archive in Backups and choose “Import into MongoDB”, or upload an NDJSON file.</p>
+    <div class="button-row">
+      <a class="btn" href="/backups">Go to backups</a>
+      <a class="btn" href="/imports/new">Upload a file</a>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}

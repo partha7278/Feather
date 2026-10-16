@@ -1,0 +1,81 @@
+{{define "content"}}
+{{$s := .Data.Source}}
+{{$isNew := eq $s.ID ""}}
+<div class="acct-narrow">
+<div class="page-head">
+  <div>
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/postgres">PostgreSQL</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">{{if $isNew}}New PostgreSQL account{{else}}{{$s.Alias}}{{end}}</span>
+    </nav>
+    <h1>{{if $isNew}}Add a PostgreSQL account{{else}}{{$s.Alias}}{{if not $s.Enabled}} <span class="badge muted">disabled</span>{{end}}{{end}}</h1>
+    <p>{{if $isNew}}The database Feather reads tables from, and deletes rows from when a config says so.{{else}}Changes apply to every config that reads from it.{{end}}</p>
+  </div>
+  {{if not $isNew}}
+  <div class="page-actions">
+    <form method="post" action="/postgres/{{$s.ID}}/test">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="btn" type="submit" title="Opens a connection and closes it again. Nothing is read or written.">Test connection</button>
+    </form>
+  </div>
+  {{end}}
+</div>
+
+<form method="post" action="{{if $isNew}}/postgres{{else}}/postgres/{{$s.ID}}{{end}}" autocomplete="off" class="acct-form">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <section class="card acct-card">
+    <div class="field">
+      <label for="alias">Alias</label>
+      <input type="text" id="alias" name="alias" value="{{$s.Alias}}" required placeholder="warehouse" aria-describedby="alias-hint" {{if $isNew}}autofocus{{end}}>
+      <p class="hint" id="alias-hint">A short name you pick from when creating a retention config.</p>
+    </div>
+
+    <div class="field">
+      <div class="acct-label-row">
+        <label for="dsn">{{if $isNew}}Connection string{{else}}Replace connection string{{end}}</label>
+        {{if not $isNew}}<span class="badge good">stored</span>{{end}}
+      </div>
+      {{if not $isNew}}
+      <div class="acct-stored" id="dsn-current">
+        <span class="visually-hidden">Stored connection string, password hidden:</span>
+        <span class="mono">{{$s.Preview}}</span>
+      </div>
+      {{end}}
+      <input type="password" id="dsn" name="dsn" placeholder="{{if $isNew}}postgres://user:password@host:5432/dbname{{else}}Paste a new string to replace it{{end}}" {{if $isNew}}required{{end}} autocomplete="new-password" aria-describedby="{{if not $isNew}}dsn-current {{end}}dsn-hint">
+      {{if $isNew}}
+        <p class="hint" id="dsn-hint">A <code>postgres://</code> URL or libpq keywords (<code>host=… dbname=… user=…</code>), naming the database to archive from. Add <code>sslmode=require</code> for a server across a network. It is encrypted before it is stored and never shown again.</p>
+      {{else}}
+        <p class="hint" id="dsn-hint">Leave blank to keep the stored string. Only the masked form above is ever shown.</p>
+      {{end}}
+    </div>
+
+    <div class="field">
+      <label for="note">Note</label>
+      <input type="text" id="note" name="note" value="{{$s.Note}}" placeholder="Optional — e.g. reporting replica, archive role">
+    </div>
+
+    <div class="field inline">
+      <input type="checkbox" id="enabled" name="enabled" {{if or $isNew $s.Enabled}}checked{{end}}>
+      <label for="enabled">Enabled — configs may use this PostgreSQL account</label>
+    </div>
+
+    <details class="acct-advanced">
+      <summary>Advanced</summary>
+      <div class="field">
+        <label for="appName">Application name</label>
+        <input type="text" id="appName" name="appName" value="{{if $s.AppName}}{{$s.AppName}}{{else}}feather{{end}}" aria-describedby="appName-hint">
+        <p class="hint" id="appName-hint">Shown as <code>application_name</code> in <code>pg_stat_activity</code>, unless the connection string sets one.</p>
+      </div>
+      <p class="hint">The account needs <code>SELECT</code> on the tables it archives, and <code>DELETE</code> on those whose configs delete. Tables need a single-column primary key.</p>
+    </details>
+
+    <div class="acct-card-foot">
+      {{if not $isNew}}<span class="small dim">Added {{datetime $s.CreatedAt}}</span>{{end}}
+      <span class="spacer"></span>
+      <a class="btn ghost" href="/postgres">Cancel</a>
+      <button class="btn primary" type="submit">{{if $isNew}}Add PostgreSQL account{{else}}Save changes{{end}}</button>
+    </div>
+  </section>
+</form>
+</div>
+{{end}}

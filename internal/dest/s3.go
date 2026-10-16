@@ -109,13 +109,13 @@ func (d *S3Destination) Check(ctx context.Context) error {
 // Key applies the destination's own prefix to a run-generated object key, so
 // two destinations can file the same archive under different layouts.
 func (d *S3Destination) Key(key string) string {
-	if d.info.Prefix == "" {
-		return key
-	}
-	return strings.TrimSuffix(d.info.Prefix, "/") + "/" + key
+	return withPrefix(d.info.Prefix, key)
 }
 
 func (d *S3Destination) Upload(ctx context.Context, key string, body io.Reader, size int64, meta Metadata) (string, error) {
+	if err := checkKey(key); err != nil {
+		return "", fmt.Errorf("uploading to %s: %w", d.info.Alias, err)
+	}
 	input := &s3.PutObjectInput{
 		Bucket:        aws.String(d.info.Bucket),
 		Key:           aws.String(key),

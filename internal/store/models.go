@@ -89,7 +89,14 @@ type Artifact struct {
 	DeletedCount      int64
 	DeletedAt         *time.Time
 	CreatedAt         time.Time
+
+	// Engine is the source engine the archive came from: config.EngineMongo
+	// or config.EnginePostgres. It decides how the archive is restored.
+	Engine string
 }
+
+// IsPostgres reports whether the archive holds PostgreSQL rows.
+func (a Artifact) IsPostgres() bool { return a.Engine == config.EnginePostgres }
 
 // ArtifactDestination is one stored copy of one artifact. LocationURL is the
 // full path to that copy, which is what an operator actually needs when asked
@@ -159,20 +166,109 @@ func (r RunSummary) Duration() time.Duration {
 	return time.Since(r.StartedAt)
 }
 
+// ImportStatus is the lifecycle state of one import. The values match the run
+// statuses they mean the same thing as, so the UI colours them alike.
+type ImportStatus string
+
+const (
+	ImportRunning ImportStatus = "running"
+	ImportSuccess ImportStatus = "success"
+	ImportFailed  ImportStatus = "failed"
+	// ImportDryRun is a dry run that read and checked everything. It wrote
+	// nothing, which is why it is not "success".
+	ImportDryRun ImportStatus = "dry_run"
+)
+
+// Where an import's documents came from.
+const (
+	ImportSourceArchive = "archive"
+	ImportSourceRun     = "run"
+	ImportSourceUpload  = "upload"
+)
+
+// What an import does with a document whose _id is already in the target.
+const (
+	ImportModeInsert  = "insert"
+	ImportModeReplace = "replace"
+)
+
+// Import is one request to put archived documents back into MongoDB, and how
+// far it got.
+type Import struct {
+	ID          uuid.UUID
+	Actor       string
+	ActorIP     string
+	SourceKind  string
+	SourceRef   string
+	SourceLabel string
+	PreferAlias string
+
+	TargetAlias      string
+	TargetDatabase   string
+	TargetCollection string
+
+	Mode       string
+	DryRun     bool
+	Status     ImportStatus
+	StartedAt  time.Time
+	FinishedAt *time.Time
+
+	FilesTotal    int
+	FilesDone     int
+	DocsExpected  int64
+	BytesExpected int64
+	DocsRead      int64
+	DocsInserted  int64
+	DocsPresent   int64
+	DocsReplaced  int64
+	BytesRead     int64
+	SHA256        string
+	Error         string
+}
+
+// Progress is how far through its input this import is, as a percentage.
+// Documents are the better measure when the catalogue knows how many to expect;
+// an upload only has a size, so it falls back to bytes. 0 means unknown.
+func (i Import) Progress() int {
+	var pct int64
+	switch {
+	case i.DocsExpected > 0:
+		pct = i.DocsRead * 100 / i.DocsExpected
+	case i.BytesExpected > 0:
+		pct = i.BytesRead * 100 / i.BytesExpected
+	default:
+		return 0
+	}
+	return int(min(pct, 100))
+}
+
+// Duration is how long the import took, or how long it has been going.
+func (i Import) Duration() time.Duration {
+	if i.FinishedAt != nil {
+		return i.FinishedAt.Sub(i.StartedAt)
+	}
+	return time.Since(i.StartedAt)
+}
+
+// Target is the namespace written to, as an operator would write it.
+func (i Import) Target() string { return i.TargetDatabase + "." + i.TargetCollection }
+
 // Totals is the headline set of numbers on the dashboard.
 type Totals struct {
-	Configs       int
-	EnabledJobs   int
-	Destinations  int
-	MongoSources  int
-	Artifacts     int64
-	DocsArchived  int64
-	DocsDeleted   int64
-	BytesStored   int64
-	FailedRuns    int64
-	RunsLast24h   int64
-	LastRunAt     *time.Time
-	OldestArchive *time.Time
+	Configs      int
+	EnabledJobs  int
+	Destinations int
+	MongoSources int
+	// PostgresSources counts enabled PostgreSQL accounts.
+	PostgresSources int
+	Artifacts       int64
+	DocsArchived    int64
+	DocsDeleted     int64
+	BytesStored     int64
+	FailedRuns      int64
+	RunsLast24h     int64
+	LastRunAt       *time.Time
+	OldestArchive   *time.Time
 }
 
 // --- credentials and configs ----------------------------------------------
@@ -201,6 +297,27 @@ func (m MongoSourceRecord) Source() config.MongoSource {
 		AuthSource: m.AuthSource,
 		AppName:    m.AppName,
 	}
+}
+
+// PostgresSourceRecord is a stored PostgreSQL account. The DSN is sealed on
+// disk; Preview is the redacted form shown in the UI.
+type PostgresSourceRecord struct {
+	ID        string
+	Alias     string
+	DSN       string // decrypted on read
+	Preview   string
+	AppName   string
+	Enabled   bool
+	Note      string
+	Check     CheckResult
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Source converts a stored record into the runtime form the Postgres pool
+// wants.
+func (p PostgresSourceRecord) Source() config.PostgresSource {
+	return config.PostgresSource{Alias: p.Alias, DSN: p.DSN, AppName: p.AppName}
 }
 
 // DestinationRecord is a stored backup destination — one S3 or Oracle account.

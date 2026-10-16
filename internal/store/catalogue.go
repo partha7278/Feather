@@ -78,12 +78,12 @@ func (s *Store) InsertArtifact(ctx context.Context, a *Artifact) error {
 		INSERT INTO feather_artifacts (
 			id, run_id, config_name, db_name, collection_name, batch_seq, file_name,
 			format, codec, doc_count, bytes_raw, bytes_compressed, sha256,
-			min_id, max_id, min_ts, max_ts, created_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			min_id, max_id, min_ts, max_ts, created_at, source_engine
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID.String(), a.RunID.String(), a.ConfigName, a.Database, a.Collection, a.BatchSeq, a.FileName,
 		a.Format, a.Codec, a.DocCount, a.BytesRaw, a.BytesCompressed, a.SHA256,
 		nullIfEmpty(a.MinID), nullIfEmpty(a.MaxID), timeTextPtr(a.MinTS), timeTextPtr(a.MaxTS),
-		timeText(a.CreatedAt))
+		timeText(a.CreatedAt), engineOrDefault(a.Engine))
 	if err != nil {
 		return fmt.Errorf("recording artifact: %w", err)
 	}
@@ -340,7 +340,7 @@ type ArtifactQuery struct {
 const artifactColumns = `
 	id, run_id, config_name, db_name, collection_name, batch_seq, file_name, format, codec,
 	doc_count, bytes_raw, bytes_compressed, sha256, COALESCE(min_id, ''), COALESCE(max_id, ''),
-	min_ts, max_ts, deleted_from_source, deleted_count, deleted_at, created_at`
+	min_ts, max_ts, deleted_from_source, deleted_count, deleted_at, created_at, source_engine`
 
 // Artifacts lists archive files with every stored copy attached. This is the
 // answer to "what was backed up, when, how big, how many documents, and where
@@ -365,9 +365,10 @@ func (s *Store) Artifacts(ctx context.Context, q ArtifactQuery) ([]ArtifactWithC
 		where = append(where, "deleted_from_source = 1")
 	}
 	if q.Search != "" {
-		where = append(where, `(file_name LIKE ? OR id IN (
-			SELECT artifact_id FROM feather_artifact_destinations WHERE object_key LIKE ?))`)
-		pattern := "%" + q.Search + "%"
+		// % and _ typed into the search box mean themselves, not wildcards.
+		where = append(where, `(file_name LIKE ? ESCAPE '\' OR id IN (
+			SELECT artifact_id FROM feather_artifact_destinations WHERE object_key LIKE ? ESCAPE '\'))`)
+		pattern := "%" + likeEscaper.Replace(q.Search) + "%"
 		args = append(args, pattern, pattern)
 	}
 	clause := strings.Join(where, " AND ")
@@ -413,7 +414,7 @@ func (s *Store) Artifacts(ctx context.Context, q ArtifactQuery) ([]ArtifactWithC
 		if err := rows.Scan(&id, &runID, &a.ConfigName, &a.Database, &a.Collection, &a.BatchSeq,
 			&a.FileName, &a.Format, &a.Codec, &a.DocCount, &a.BytesRaw, &a.BytesCompressed,
 			&a.SHA256, &a.MinID, &a.MaxID, &minTS, &maxTS, &deletedFromSource, &a.DeletedCount,
-			&deletedAt, &createdAt); err != nil {
+			&deletedAt, &createdAt, &a.Engine); err != nil {
 			return nil, 0, err
 		}
 		a.ID, _ = uuid.Parse(id)
@@ -500,6 +501,7 @@ func (s *Store) Totals(ctx context.Context) (Totals, error) {
 			(SELECT COUNT(*) FROM job_configs WHERE enabled = 1),
 			(SELECT COUNT(*) FROM destinations WHERE enabled = 1),
 			(SELECT COUNT(*) FROM mongo_sources WHERE enabled = 1),
+			(SELECT COUNT(*) FROM postgres_sources WHERE enabled = 1),
 			(SELECT COUNT(*) FROM feather_artifacts),
 			(SELECT COALESCE(SUM(doc_count), 0) FROM feather_artifacts),
 			(SELECT COALESCE(SUM(deleted_count), 0) FROM feather_artifacts),
@@ -507,7 +509,7 @@ func (s *Store) Totals(ctx context.Context) (Totals, error) {
 			(SELECT COUNT(*) FROM feather_runs WHERE status IN ('failed','partial')),
 			(SELECT COUNT(*) FROM feather_runs WHERE started_at >= ?)`,
 		timeText(time.Now().Add(-24*time.Hour))).
-		Scan(&t.Configs, &t.EnabledJobs, &t.Destinations, &t.MongoSources, &t.Artifacts,
+		Scan(&t.Configs, &t.EnabledJobs, &t.Destinations, &t.MongoSources, &t.PostgresSources, &t.Artifacts,
 			&t.DocsArchived, &t.DocsDeleted, &t.BytesStored, &t.FailedRuns, &t.RunsLast24h)
 	if err != nil {
 		return t, err
@@ -707,3 +709,15 @@ func (s *Store) failuresSinceSuccess(ctx context.Context) (map[string]int64, err
 	}
 	return out, rows.Err()
 }
+
+// engineOrDefault stores an unset engine as MongoDB, which is what every
+// archive written before there was a choice came from.
+func engineOrDefault(engine string) string {
+	if engine == "" {
+		return config.EngineMongo
+	}
+	return engine
+}
+
+// likeEscaper escapes LIKE metacharacters for use with ESCAPE '\'.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)

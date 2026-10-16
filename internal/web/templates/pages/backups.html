@@ -1,13 +1,19 @@
 {{define "content"}}
+{{$del := ""}}{{if .Data.Filter.DeletedOnly}}{{$del = "1"}}{{end}}
 <div class="page-head">
   <div>
-    <h1>Backups</h1>
-    <p>Every archive file feather has written: what it is called, when it was written, how many documents it holds, how large it is, and exactly where each copy of it lives.</p>
+    <h1>Archives</h1>
+    <p>Every archive file Feather has written, and exactly where each copy lives. To restore, open the run and use <em>Restore or verify</em>.</p>
   </div>
 </div>
 
-<div class="card">
-  <form method="get" action="/backups" class="filters">
+<div class="card flush">
+  <form method="get" action="/backups" class="filters toolbar backups-filters">
+    {{if .Data.Filter.RunID}}<input type="hidden" name="run" value="{{.Data.Filter.RunID}}">
+    <div class="field run-scope">
+      <span class="field-label" id="run-scope-label">Run</span>
+      <a class="run-chip mono" href="/runs/{{.Data.Filter.RunID}}" aria-describedby="run-scope-label" title="{{.Data.Filter.RunID}}">{{truncate 8 .Data.Filter.RunID}}</a>
+    </div>{{end}}
     <div class="field">
       <label for="config">Config</label>
       <select id="config" name="config">
@@ -17,83 +23,91 @@
         {{end}}
       </select>
     </div>
-    <div class="field" style="flex:1;min-width:220px">
+    <div class="field grow">
       <label for="q">Search</label>
-      <input type="text" id="q" name="q" value="{{.Data.Filter.Search}}" placeholder="file name or object key">
+      <input type="search" id="q" name="q" value="{{.Data.Filter.Search}}" placeholder="File name or object key" aria-describedby="q-hint">
     </div>
-    <div class="field inline" style="padding-bottom:8px">
+    <div class="field check">
       <input type="checkbox" id="deleted" name="deleted" value="1" {{if .Data.Filter.DeletedOnly}}checked{{end}}>
       <label for="deleted">Only where source was deleted</label>
     </div>
     <button class="btn" type="submit">Filter</button>
-    {{if or .Data.Filter.ConfigName .Data.Filter.Search .Data.Filter.DeletedOnly}}
-      <a class="btn link" href="/backups">Clear</a>
+    {{if or .Data.Filter.ConfigName .Data.Filter.Search .Data.Filter.DeletedOnly .Data.Filter.RunID}}
+      <a class="btn ghost" href="/backups">Clear</a>
     {{end}}
+    <p class="hint toolbar-hint" id="q-hint">Dates in file names are when the run happened, not the dates of the data inside — use the Data range column for that.</p>
   </form>
 
   {{if .Data.Artifacts}}
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Archive files">
+    <table class="align-top backups-table stack">
       <thead>
         <tr>
-          <th class="wide">File</th><th>Config</th><th>Written</th><th>Data range</th>
-          <th class="num">Documents</th><th class="num">Size</th><th>Source</th><th></th>
+          <th scope="col" class="wide">File</th><th scope="col">Config</th><th scope="col">Written</th><th scope="col">Data range</th>
+          <th scope="col" class="num">Documents</th><th scope="col" class="num">Size</th><th scope="col">Source</th><th scope="col"><span class="visually-hidden">Actions</span></th>
         </tr>
       </thead>
       <tbody>
       {{range .Data.Artifacts}}
         <tr>
-          <td class="wide">
-            <span class="mono small break">{{.FileName}}</span>
-            <div class="dim small">{{.Codec}} · batch {{.BatchSeq}}</div>
+          <td class="wide first">
+            <span class="file-name">{{.FileName}}</span>
+            <div class="file-meta">
+              <span class="dim small">{{.Codec}} · batch {{.BatchSeq}}</span>
+              <details class="copies-details">
+                <summary>{{len .Copies}} {{if eq (len .Copies) 1}}copy{{else}}copies{{end}}{{range .Copies}}{{if ne (statusTone .Status) "good"}} · <span class="tone-{{statusTone .Status}}">{{.Status}}</span>{{end}}{{end}}</summary>
+                <div class="copies">
+                  {{range .Copies}}
+                    <div class="copy">
+                      <span class="badge {{statusTone .Status}}">{{.Status}}</span>
+                      <span>
+                        <span class="copy-alias">{{.Alias}}</span><span class="dim">{{if .StorageClass}} · {{.StorageClass}}{{end}} · {{bytes .SizeBytes}}</span>
+                        <span class="where">{{.LocationURL}}</span>
+                        {{if .Error}}<span class="copy-error" title="{{.Error}}">{{truncate 160 .Error}}</span>{{end}}
+                      </span>
+                    </div>
+                  {{else}}
+                    <span class="dim small">No copies recorded</span>
+                  {{end}}
+                  <div class="small mono sha" title="SHA-256 of the compressed file">sha256 {{.SHA256}}</div>
+                </div>
+              </details>
+            </div>
           </td>
-          <td class="small">
+          <td class="nowrap" data-label="Config">
             {{.ConfigName}}
-            <div class="dim">{{.Database}}.{{.Collection}}</div>
+            <div class="dim small">{{.Database}}.{{.Collection}}</div>
           </td>
-          <td class="small nowrap">
+          <td class="nowrap" data-label="Written">
             {{datetime .CreatedAt}}
-            <div class="dim">{{since .CreatedAt}}</div>
+            <div class="dim small">{{since .CreatedAt}}</div>
           </td>
-          <td class="small nowrap dim">
-            {{if .MinTS}}{{date .MinTS}}{{if .MaxTS}} → {{date .MaxTS}}{{end}}{{else}}—{{end}}
+          <td class="nowrap dim" data-label="Data range">
+            {{if .MinTS}}{{date .MinTS}}{{if .MaxTS}} →<div>{{date .MaxTS}}</div>{{end}}{{else}}—{{end}}
           </td>
-          <td class="num">{{number .DocCount}}</td>
-          <td class="num">
+          <td class="num" data-label="Documents">{{number .DocCount}}</td>
+          <td class="num" data-label="Size">
             {{bytes .BytesCompressed}}
             <div class="dim small">from {{bytes .BytesRaw}}</div>
           </td>
-          <td class="small">
+          <td class="nowrap" data-label="Source">
             {{if .DeletedFromSource}}
               <span class="badge warn">deleted</span>
-              <div class="dim">{{number .DeletedCount}} docs</div>
-              <div class="dim">{{date .DeletedAt}}</div>
+              <div class="dim small">{{if ne .DeletedCount .DocCount}}{{number .DeletedCount}} docs · {{end}}{{date .DeletedAt}}</div>
             {{else}}
               <span class="badge muted">kept</span>
             {{end}}
           </td>
-          <td class="actions small nowrap">
-            <a href="/runs/{{.RunID}}">run details</a>
+          <td class="actions">
+            <a class="btn small ghost icon-only" href="/runs/{{.RunID}}" title="Run details" aria-label="Run details for {{.FileName}}">{{template "icon-activity"}}</a>
             {{if .Copies}}
-              <a href="/backups/{{.ID}}/download" title="Download this archive from the first destination that still has it">download</a>
-            {{end}}
-          </td>
-        </tr>
-        <tr class="detail-row">
-          <td colspan="8">
-            <div class="copies">
-              {{range .Copies}}
-                <div class="copy">
-                  <span class="badge {{statusTone .Status}}">{{.Status}}</span>
-                  <span class="where">{{.LocationURL}}</span>
-                  <span class="dim small nowrap">{{.Alias}}{{if .StorageClass}} · {{.StorageClass}}{{end}} · {{bytes .SizeBytes}}</span>
-                  {{if .Error}}<span class="dim small break">{{truncate 160 .Error}}</span>{{end}}
-                </div>
+              {{if .IsPostgres}}
+              <a class="btn small icon-only" href="/backups/{{.ID}}/download" title="Download ({{.Codec}}-compressed NDJSON, one row_to_json row per line — feather restore {{.ID}} puts it back)" aria-label="Download {{.FileName}}">{{template "icon-download"}}</a>
               {{else}}
-                <span class="dim small">no copies recorded</span>
+              <a class="btn small icon-only" href="/backups/{{.ID}}/download" title="Download ({{.Codec}}-compressed NDJSON — mongoimport reads it after decompressing)" aria-label="Download {{.FileName}}">{{template "icon-download"}}</a>
+              <a class="btn small icon-only" href="/imports/new?archive={{.ID}}" title="Import into MongoDB" aria-label="Import {{.FileName}} into MongoDB">{{template "icon-upload"}}</a>
               {{end}}
-              <div class="dim small mono" title="SHA-256 of the compressed file">sha256 {{.SHA256}}</div>
-            </div>
+            {{end}}
           </td>
         </tr>
       {{end}}
@@ -102,14 +116,22 @@
   </div>
 
   <div class="pager">
-    <span>{{number .Data.Total}} file(s){{if gt .Data.Pages 1}} · page {{.Data.Page}} of {{.Data.Pages}}{{end}}</span>
+    <span>{{number .Data.Total}} {{if eq .Data.Total 1}}file{{else}}files{{end}}{{if gt .Data.Pages 1}} · page {{.Data.Page}} of {{.Data.Pages}}{{end}}</span>
     <span>
-      {{if .Data.HasPrev}}<a class="btn small" href="/backups{{queryString "config" .Data.Filter.ConfigName "q" .Data.Filter.Search "page" (sub .Data.Page 1)}}">Previous</a>{{end}}
-      {{if .Data.HasNext}}<a class="btn small" href="/backups{{queryString "config" .Data.Filter.ConfigName "q" .Data.Filter.Search "page" (add .Data.Page 1)}}">Next</a>{{end}}
+      {{if .Data.HasPrev}}<a class="btn small" href="/backups{{queryString "config" .Data.Filter.ConfigName "run" .Data.Filter.RunID "q" .Data.Filter.Search "deleted" $del "page" (sub .Data.Page 1)}}">Previous</a>{{end}}
+      {{if .Data.HasNext}}<a class="btn small" href="/backups{{queryString "config" .Data.Filter.ConfigName "run" .Data.Filter.RunID "q" .Data.Filter.Search "deleted" $del "page" (add .Data.Page 1)}}">Next</a>{{end}}
     </span>
+  </div>
+  {{else if or .Data.Filter.ConfigName .Data.Filter.Search .Data.Filter.DeletedOnly .Data.Filter.RunID}}
+  <div class="empty">
+    <span class="empty-icon">{{template "icon-search"}}</span>
+    <h3>No files match these filters</h3>
+    <p>Try a different config or search term, or clear the filters to see every archive file.</p>
+    <a class="btn" href="/backups">Clear filters</a>
   </div>
   {{else}}
   <div class="empty">
+    <span class="empty-icon">{{template "icon-archive"}}</span>
     <h3>No archives recorded yet</h3>
     <p>Every file written by a run is catalogued here, together with every place it was stored.</p>
     <a class="btn" href="/configs">Go to retention configs</a>

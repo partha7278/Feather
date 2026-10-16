@@ -1,85 +1,145 @@
 {{define "content"}}
 {{$run := .Data.Run}}
+{{$dry := or $run.DryRun (eq (print $run.Status) "dry_run")}}
+{{$trouble := or $run.Error (eq (print $run.Status) "failed") (eq (print $run.Status) "partial")}}
 <div class="page-head">
   <div>
-    <h1>{{$run.ConfigName}}</h1>
-    <p>Run started {{datetime $run.StartedAt}} · <span class="mono small">{{$run.RunID}}</span></p>
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/runs">Runs</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">{{$run.ConfigName}}</span>
+    </nav>
+    <h1>{{$run.ConfigName}} {{if eq (print $run.Status) "dry_run"}}<span class="badge muted">dry run</span>{{else}}<span class="badge {{statusTone $run.Status}}">{{$run.Status}}</span>{{end}}</h1>
+    <dl class="run-meta">
+      <div><dt>Started</dt><dd>{{datetime $run.StartedAt}} <span class="dim">· {{since $run.StartedAt}}</span></dd></div>
+      <div><dt>{{if $run.FinishedAt}}Took{{else}}Running for{{end}}</dt><dd class="tabular">{{duration $run.Duration}}</dd></div>
+      <div><dt>Trigger</dt><dd>{{if eq (print $run.Trigger) "cron"}}Scheduled{{else if eq (print $run.Trigger) "ui"}}Control panel{{else if eq (print $run.Trigger) "manual"}}Command line{{else}}{{$run.Trigger}}{{end}}{{if $run.DryRun}} · dry run{{end}}</dd></div>
+      <div><dt>Run ID</dt><dd class="mono run-id">{{$run.RunID}}</dd></div>
+    </dl>
   </div>
+  {{if .Data.Artifacts}}
   <div class="page-actions">
-    <a class="btn" href="/backups{{queryString "run" $run.RunID}}">Files from this run</a>
-    <a class="btn" href="/runs">All runs</a>
+    <a class="btn" href="/backups{{queryString "run" $run.RunID}}">{{template "icon-archive"}} Files from this run</a>
+    {{if $run.FinishedAt}}<a class="btn" href="/imports/new{{queryString "run" $run.RunID}}">{{template "icon-upload"}} Import this run</a>{{end}}
   </div>
+  {{end}}
 </div>
 
 {{if not $run.FinishedAt}}
-<div class="notice">
-  <strong>This run is still going.</strong>
+<section class="card progress-panel" aria-labelledby="progress-title">
+  <div class="progress-head">
+    <h2 id="progress-title">Archiving in progress</h2>
+    {{if gt $run.DocsMatched 0}}<span class="progress-pct" aria-hidden="true">{{$run.Progress}}%</span>{{end}}
+  </div>
   {{if gt $run.DocsMatched 0}}
-    <span>{{number $run.DocsArchived}} of about {{number $run.DocsMatched}} matching documents archived.</span>
     <div class="progress" role="progressbar" aria-valuenow="{{$run.Progress}}" aria-valuemin="0" aria-valuemax="100"
          aria-label="Archiving progress">
       <div class="progress-bar" style="width:{{$run.Progress}}%"></div>
     </div>
+    <p class="hint"><strong class="tabular">{{number $run.DocsArchived}}</strong> of about <span class="tabular">{{number $run.DocsMatched}}</span> matching documents archived · this page refreshes every few seconds.</p>
   {{else}}
-    <span>Counting matching documents.</span>
+    <p class="hint">Counting matching documents · this page refreshes every few seconds.</p>
   {{end}}
-  <span class="hint">This page refreshes itself while the run is going.</span>
+</section>
+{{end}}
+
+{{if and $dry $run.FinishedAt}}
+<div class="notice info dry-run-notice">
+  <strong>Dry run — nothing was uploaded and nothing was deleted.</strong>
+  These are the numbers a real run would produce right now.
 </div>
 {{end}}
 
-{{if $run.Error}}
+{{if and $trouble $run.FinishedAt}}
+<div class="notice danger run-trouble">
+  <strong>This run did not complete cleanly</strong>
+  {{if $run.Error}}<span class="break">{{$run.Error}}</span>{{end}}
+  <p class="data-fate">
+    <strong>What happened to your data:</strong>
+    {{if .Data.Artifacts}}files marked <span class="badge muted">kept</span> below were not deleted from the source{{if gt $run.DocsDeleted 0}}; only files marked <span class="badge warn">deleted</span> were removed, after every copy of them verified{{end}}. The next run will pick the kept records up again automatically.
+    {{else}}this run wrote no files and deleted nothing from the source. The next run will pick the same records up again automatically.{{end}}
+  </p>
+  <nav class="next-steps" aria-label="Next steps">
+    <span class="next-steps-label">Next steps</span>
+    <a href="/destinations">Test destinations</a>
+    <a href="/mongo">Test MongoDB accounts</a>
+    <a href="/postgres">Test PostgreSQL accounts</a>
+    <a href="/runs{{queryString "config" $run.ConfigName}}">All runs of {{$run.ConfigName}}</a>
+  </nav>
+</div>
+{{else if $run.Error}}
 <div class="notice danger">
   <strong>This run did not complete cleanly</strong>
   <span class="break">{{$run.Error}}</span>
 </div>
 {{end}}
 
-<div class="grid stats" style="margin-bottom:18px">
-  <div class="stat"><div class="label">Status</div><div class="value" style="font-size:19px"><span class="badge {{statusTone $run.Status}}">{{$run.Status}}</span></div><div class="sub">{{$run.Trigger}}{{if $run.DryRun}} · dry run{{end}}</div></div>
-  <div class="stat"><div class="label">Matched</div><div class="value">{{number $run.DocsMatched}}</div><div class="sub">selected by the filter</div></div>
-  <div class="stat"><div class="label">Scanned</div><div class="value">{{number $run.DocsScanned}}</div><div class="sub">documents read</div></div>
-  <div class="stat"><div class="label">Archived</div><div class="value">{{number $run.DocsArchived}}</div><div class="sub">in {{$run.Batches}} file(s)</div></div>
-  <div class="stat"><div class="label">Deleted</div><div class="value">{{number $run.DocsDeleted}}</div><div class="sub">removed from MongoDB</div></div>
-  <div class="stat"><div class="label">Stored</div><div class="value">{{bytes $run.BytesStored}}</div><div class="sub">compressed, per copy</div></div>
-  <div class="stat"><div class="label">Duration</div><div class="value" style="font-size:19px">{{duration $run.Duration}}</div><div class="sub">{{if $run.FinishedAt}}finished {{datetime $run.FinishedAt}}{{else}}still running{{end}}</div></div>
+<div class="grid stats strip run-stats">
+  <div class="stat"><div class="label">Matched</div><div class="value{{if eq $run.DocsMatched 0}} zero{{end}}">{{number $run.DocsMatched}}</div><div class="sub">selected by the filter</div></div>
+  <div class="stat"><div class="label">Scanned</div><div class="value{{if eq $run.DocsScanned 0}} zero{{end}}">{{number $run.DocsScanned}}</div><div class="sub">documents read</div></div>
+  {{if $dry}}
+  <div class="stat"><div class="label">Would archive</div><div class="value{{if eq $run.DocsArchived 0}} zero{{end}}">{{number $run.DocsArchived}}</div><div class="sub">in {{$run.Batches}} file(s)</div></div>
+  <div class="stat"><div class="label">Would delete</div><div class="value zero">—</div><div class="sub">the archived documents, if the config deletes</div></div>
+  <div class="stat"><div class="label">Compressed size</div><div class="value{{if eq $run.BytesStored 0}} zero{{end}}">{{bytes $run.BytesStored}}</div><div class="sub">not uploaded</div></div>
+  {{else}}
+  <div class="stat"><div class="label">Archived</div><div class="value{{if eq $run.DocsArchived 0}} zero{{end}}">{{number $run.DocsArchived}}</div><div class="sub">in {{$run.Batches}} file(s)</div></div>
+  <div class="stat{{if gt $run.DocsDeleted 0}} warn{{end}}"><div class="label">Deleted</div><div class="value{{if eq $run.DocsDeleted 0}} zero{{end}}">{{number $run.DocsDeleted}}</div><div class="sub">removed from the source</div></div>
+  <div class="stat"><div class="label">Stored</div><div class="value{{if eq $run.BytesStored 0}} zero{{end}}">{{bytes $run.BytesStored}}</div><div class="sub">compressed, per copy</div></div>
+  {{end}}
 </div>
 
-<div class="card">
-  <h2>Filter as resolved</h2>
-  <p class="hint">Relative time tokens are resolved once, when the run starts. This is the exact selection the run was allowed to touch.</p>
+<details class="card disclosure" open>
+  <summary><h2>Filter as resolved</h2></summary>
+  <p class="hint">Time tokens are resolved once, when the run starts. This is the exact selection the run was allowed to touch.</p>
   <pre class="code">{{prettyJSON .Data.Filter}}</pre>
-</div>
+</details>
 
-<div class="card">
-  <h2>Files</h2>
+{{if and .Data.Artifacts $run.FinishedAt (not $dry)}}
+<details class="card disclosure restore-panel">
+  <summary><h2>Restore or verify this run</h2></summary>
+  <p class="hint">Run these on the Feather host. Every restore checks each archive against its recorded SHA-256 before writing anything.</p>
+  <dl class="restore-commands">
+    <div><dt>Check every archive, write nothing</dt><dd><code class="copy-block">feather restore {{$run.RunID}} --dry-run</code></dd></div>
+    <div><dt>Restore beside the live data</dt><dd><code class="copy-block">feather restore {{$run.RunID}} --into {{with index $.Data.Artifacts 0}}{{.Database}}.{{.Collection}}{{end}}_restored</code></dd></div>
+    <div><dt>Put the documents back where they came from</dt><dd><code class="copy-block">feather restore {{$run.RunID}}</code></dd></div>
+    <div><dt>Re-check every stored copy</dt><dd><code class="copy-block">feather verify {{$run.RunID}}</code></dd></div>
+  </dl>
+</details>
+{{end}}
+
+<div class="card run-files">
+  <div class="card-head"><div><h2>Files</h2><p class="hint">Each archive file this run wrote, and every copy of it.</p></div></div>
   {{if .Data.Artifacts}}
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Files from this run">
+    <table class="align-top files-table stack">
       <thead>
-        <tr><th>#</th><th>File</th><th class="num">Documents</th><th class="num">Size</th><th>Data range</th><th>Source</th><th>Copies</th></tr>
+        <tr><th scope="col" class="num">#</th><th scope="col">File</th><th scope="col" class="num">Documents</th><th scope="col" class="num">Size</th><th scope="col">Source</th><th scope="col">Copies</th></tr>
       </thead>
       <tbody>
       {{range .Data.Artifacts}}
         <tr>
-          <td class="dim">{{.BatchSeq}}</td>
-          <td class="wide mono small break">{{.FileName}}<div class="dim small">sha256 {{truncate 16 .SHA256}}</div></td>
-          <td class="num">{{number .DocCount}}</td>
-          <td class="num">{{bytes .BytesCompressed}}<div class="dim small">from {{bytes .BytesRaw}}</div></td>
-          <td class="small dim nowrap">{{if .MinTS}}{{date .MinTS}} → {{date .MaxTS}}{{else}}—{{end}}</td>
-          <td class="small">
-            {{if .DeletedFromSource}}<span class="badge warn">deleted {{number .DeletedCount}}</span>{{else}}<span class="badge muted">kept</span>{{end}}
+          <td class="num dim seq">{{.BatchSeq}}</td>
+          <td class="file-cell span">
+            <span class="file-name">{{.FileName}}</span>
+            <div class="dim small nowrap">{{if .MinTS}}{{date .MinTS}} → {{date .MaxTS}}{{else}}No timestamp range{{end}}</div>
+            <div class="small sha" title="SHA-256 of the compressed file: {{.SHA256}}">sha256 {{truncate 16 .SHA256}}</div>
           </td>
-          <td>
+          <td class="num" data-label="Documents">{{number .DocCount}}</td>
+          <td class="num" data-label="Size">{{bytes .BytesCompressed}}<div class="dim small">from {{bytes .BytesRaw}}</div></td>
+          <td class="nowrap" data-label="Source">
+            {{if .DeletedFromSource}}<span class="badge warn">deleted</span><div class="dim small">{{number .DeletedCount}} docs</div>{{else}}<span class="badge muted">kept</span>{{end}}
+          </td>
+          <td class="copies-cell span">
             <div class="copies">
             {{range .Copies}}
               <div class="copy">
                 <span class="badge {{statusTone .Status}}">{{.Status}}</span>
                 <span>
+                  <span class="copy-alias">{{.Alias}}</span><span class="dim"> · {{bytes .SizeBytes}}{{if .VerifiedAt}} · verified {{datetime .VerifiedAt}}{{end}}</span>
                   <span class="where">{{.LocationURL}}</span>
-                  <div class="dim small">{{.Alias}} · {{bytes .SizeBytes}}{{if .VerifiedAt}} · verified {{datetime .VerifiedAt}}{{end}}</div>
-                  {{if .Error}}<div class="dim small break">{{.Error}}</div>{{end}}
+                  {{if .Error}}<span class="copy-error">{{.Error}}</span>{{end}}
                 </span>
               </div>
+            {{else}}
+              <span class="dim small">No copies recorded</span>
             {{end}}
             </div>
           </td>
@@ -89,7 +149,7 @@
     </table>
   </div>
   {{else}}
-  <p class="dim small">This run produced no files{{if eq (print $run.Status) "success"}} — nothing matched its filter{{end}}.</p>
+  <p class="empty-line">{{if $dry}}A dry run writes no files; a real run would have written {{$run.Batches}}.{{else}}This run produced no files{{if eq (print $run.Status) "success"}} — nothing matched its filter{{end}}.{{end}}</p>
   {{end}}
 </div>
 {{end}}

@@ -1,0 +1,146 @@
+{{define "content"}}
+{{$f := .Data.Form}}
+<div class="page-head">
+  <div>
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/imports">Imports</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">New</span>
+    </nav>
+    <h1>{{if $f.Upload}}Import a file{{else}}Import into MongoDB{{end}}</h1>
+    <p>Puts archived documents back into a collection. Start with a dry run: it reads and checks everything and writes nothing.</p>
+  </div>
+</div>
+
+{{if .Data.Busy}}
+<div class="notice info">
+  <strong>An import is running</strong>
+  One import runs at a time. This one can start when it finishes — see <a href="/imports">Imports</a>.
+</div>
+{{end}}
+
+<form method="post" class="long-form import-form"
+      {{if $f.Upload}}action="/imports/upload" enctype="multipart/form-data"{{else}}action="/imports"{{end}}>
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  {{if not $f.Upload}}
+  <input type="hidden" name="sourceKind" value="{{$f.SourceKind}}">
+  <input type="hidden" name="sourceRef" value="{{$f.SourceRef}}">
+  {{end}}
+
+  <section class="card form-section">
+    <header class="section-head">
+      <h2>Source</h2>
+      <p class="hint">{{if $f.Upload}}A file from your computer.{{else}}From the catalogue. The SHA-256 and document count of every file are checked as it is read.{{end}}</p>
+    </header>
+    <div class="section-body">
+    {{if $f.Upload}}
+      <div class="field">
+        <label for="file">File</label>
+        <input type="file" id="file" name="file" required accept=".ndjson,.jsonl,.json,.gz,.zst,.zstd" aria-describedby="file-hint">
+        <p class="hint" id="file-hint">
+          One MongoDB Extended JSON document per line (canonical or relaxed, as <code>mongoexport</code> writes it) —
+          <code>.ndjson</code>, <code>.jsonl</code> or <code>.json</code>, plain or compressed as <code>.gz</code> or <code>.zst</code>.
+          Up to {{bytes .Data.MaxUpload}}. If this form is shown again with an error, choose the file again.
+        </p>
+      </div>
+      <p class="hint">To import an archive Feather wrote, start from its row in <a href="/backups">Backups</a> instead — nothing needs downloading, and its checksum is verified against the catalogue.</p>
+    {{else}}
+      <dl class="run-meta import-source">
+        <div><dt>{{if eq $f.SourceKind "run"}}Archives{{else}}Archive{{end}}</dt><dd class="break">{{$f.SourceLabel}}</dd></div>
+        <div><dt>Config</dt><dd>{{$f.ConfigName}}</dd></div>
+        <div><dt>Archived from</dt><dd class="mono small">{{$f.Origin}}</dd></div>
+        <div><dt>Documents</dt><dd class="tabular">{{number $f.DocsExpected}}</dd></div>
+        <div><dt>Size</dt><dd class="tabular">{{bytes $f.BytesExpected}}</dd></div>
+      </dl>
+      <div class="field">
+        <label for="preferAlias">Read from</label>
+        <select id="preferAlias" name="preferAlias" class="field-medium" aria-describedby="preferAlias-hint">
+          {{range $f.Copies}}
+            <option value="{{.Alias}}" {{if eq .Alias $f.PreferAlias}}selected{{end}} {{if not .Readable}}disabled{{end}}>{{.Alias}}{{if not .Readable}} (not configured any more){{end}}</option>
+          {{end}}
+        </select>
+        <p class="hint" id="preferAlias-hint">The destination whose copy is read.</p>
+      </div>
+    {{end}}
+    </div>
+  </section>
+
+  <section class="card form-section">
+    <header class="section-head">
+      <h2>Target</h2>
+      <p class="hint">Where the documents go. The collection is created if it does not exist.</p>
+    </header>
+    <div class="section-body">
+      <div class="row">
+        <div class="field">
+          <label for="targetAlias">MongoDB account</label>
+          <select id="targetAlias" name="targetAlias" required data-source>
+            <option value="">Choose an account…</option>
+            {{range .Data.Sources}}
+              <option value="{{.Alias}}" {{if eq .Alias $f.TargetAlias}}selected{{end}} {{if not .Enabled}}disabled{{end}}>{{.Alias}}{{if not .Enabled}} (disabled){{end}}</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="field">
+          <label for="targetDatabase">Database</label>
+          <input type="text" id="targetDatabase" name="targetDatabase" value="{{$f.TargetDatabase}}" required list="database-options" data-database>
+          <datalist id="database-options"></datalist>
+        </div>
+        <div class="field">
+          <label for="targetCollection">Collection</label>
+          <input type="text" id="targetCollection" name="targetCollection" value="{{$f.TargetCollection}}" required list="collection-options" data-collection>
+          <datalist id="collection-options"></datalist>
+        </div>
+      </div>
+      <p class="hint">The account needs write access to this database — the <code>readWrite</code> role, or more. A read-only account fails on the first batch, and a dry run cannot tell.</p>
+
+      {{if $f.LoopConfig}}
+      <div class="notice danger">
+        <strong>The config {{$f.LoopConfig}} deletes from this collection</strong>
+        It archives and then deletes matching documents from {{$f.TargetDatabase}}.{{$f.TargetCollection}}. Imported documents that still match its filter will be deleted again on its next run.
+      </div>
+      <div class="field inline">
+        <input type="checkbox" id="acknowledge" name="acknowledge" value="1" {{if $f.Acknowledge}}checked{{end}}>
+        <label for="acknowledge">I understand, import into this collection anyway</label>
+      </div>
+      {{end}}
+    </div>
+  </section>
+
+  <section class="card form-section">
+    <header class="section-head">
+      <h2>Documents that already exist</h2>
+      <p class="hint">Matched by <code>_id</code>. Nothing is ever dropped or deleted.</p>
+    </header>
+    <div class="section-body">
+      <fieldset class="field choices import-modes">
+        <legend class="visually-hidden">Mode</legend>
+        <div class="field inline">
+          <input type="radio" id="mode-insert" name="mode" value="insert" {{if ne $f.Mode "replace"}}checked{{end}} data-import-mode>
+          <label for="mode-insert">Add missing documents only (safe, repeatable)
+            <span class="hint">A document already in the collection is left as it is and counted as already present. Running the same import twice changes nothing the second time.</span>
+          </label>
+        </div>
+        <div class="field inline">
+          <input type="radio" id="mode-replace" name="mode" value="replace" {{if eq $f.Mode "replace"}}checked{{end}} data-import-mode>
+          <label for="mode-replace">Replace documents with the same _id (overwrites)
+            <span class="hint">The archived version overwrites whatever is there now, including any changes made since it was archived.</span>
+          </label>
+        </div>
+      </fieldset>
+      <div class="field" data-replace-only>
+        <label for="password">Your password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" aria-describedby="password-hint">
+        <p class="hint" id="password-hint">Only for replacing, and not for a dry run. Asked again because a replace overwrites data, and is recorded in the audit log as destructive.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="actions-bar">
+    <span class="spacer"></span>
+    <a class="btn ghost" href="/imports">Cancel</a>
+    <button class="btn" type="submit" name="action" value="dryrun" title="Read and check everything; write nothing">Dry run</button>
+    <button class="btn primary" type="submit" name="action" value="import"
+            data-replace-confirm="Replace documents in the target collection? Every document with a matching _id is overwritten with the archived version."
+            {{if eq $f.Mode "replace"}}data-confirm="Replace documents in {{$f.TargetDatabase}}.{{$f.TargetCollection}}? Every document with a matching _id is overwritten with the archived version."{{end}}>{{template "icon-upload"}} Import</button>
+  </div>
+</form>
+{{end}}

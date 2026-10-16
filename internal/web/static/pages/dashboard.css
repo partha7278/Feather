@@ -1,0 +1,91 @@
+/* Overview page — page-only styles. Shared components live in /static/app.css.
+   Everything here is scoped to .overview: this file loads on every page. */
+
+/* --- table cards ---------------------------------------------------------
+   Flush card heads, the head → table seam, empty lines and compact rows all
+   come from app.css. */
+.overview .empty-line a { color: var(--text-dim); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 2px; }
+.overview .empty-line a:hover { color: var(--brand); text-decoration-color: currentColor; }
+.overview .table-wrap td .badge { vertical-align: 0; }
+.overview .table-wrap td.first, .overview .table-wrap td.mono { white-space: nowrap; }
+
+/* An empty number is a quiet dash, not a column of zeros. */
+.overview .nil { color: var(--text-faint); }
+
+/* Recent runs: the whole row opens the run. The name is the real link (one
+   tab stop per row); its ::after stretches over the row for the pointer. */
+.overview .runs-table tbody tr { position: relative; }
+.overview .runs-table .row-link::after { content: ""; position: absolute; inset: 0; }
+.overview .runs-table .row-link:focus-visible { outline: none; }
+.overview .runs-table .row-link:focus-visible::after { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: var(--radius-xs); }
+.overview .runs-table tbody tr:hover > td { cursor: pointer; }
+.overview .runs-table tbody tr:hover .row-link { color: var(--brand); text-decoration-color: currentColor; }
+.overview .runs-table td.first { width: 32%; }
+.overview .runs-table th.num, .overview .runs-table td.num { width: 11%; }
+
+/* Schedule | Storage: same head height so the two tables start level. */
+.overview .grid.two { align-items: stretch; }
+.overview .grid.two > .card { display: flex; flex-direction: column; }
+.overview .grid.two .card-head { min-height: 64px; }
+
+/* --- setup stepper ------------------------------------------------------- */
+.overview .setup-card .card-head { margin-bottom: 16px; align-items: flex-start; }
+.overview .setup-count {
+  flex: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-faint);
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.overview .setup-card .step { min-height: 100%; }
+.overview .setup-card .step > div { display: flex; flex-direction: column; align-items: flex-start; }
+.overview .setup-card .step:not(.done) { border-color: var(--border-strong); }
+/* The next step to take: brand edge and number; later ones stay neutral. */
+.overview .setup-card .step:not(.done):not(.step:not(.done) ~ .step) { border-color: var(--brand-line); box-shadow: inset 3px 0 0 var(--brand); }
+.overview .setup-card .step:not(.done):not(.step:not(.done) ~ .step) .num { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+.overview .setup-card .step.done p { color: var(--text-faint); }
+
+/* --- needs attention ----------------------------------------------------
+   One red-edged callout per config whose latest run failed or was partial. */
+.overview .attention { margin-bottom: 16px; }
+.overview .attention-title {
+  margin: 0 0 8px;
+  font-size: 12px; line-height: 16px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.overview .attention .notice { margin-bottom: 8px; padding-right: 120px; }
+.overview .attention .notice:last-child { margin-bottom: 0; }
+.overview .attention-error { color: var(--text-dim); overflow-wrap: anywhere; }
+.overview .attention .notice .hint { margin-top: 4px; color: var(--text-faint); font-size: 12px; }
+.overview .attention .notice a.attention-link {
+  position: absolute; top: 12px; right: 16px;
+  color: var(--brand); font-weight: 500; text-decoration: none; white-space: nowrap;
+}
+.overview .attention .notice a.attention-link:hover { color: var(--brand-hover); text-decoration: underline; }
+
+/* --- first run (set up, never run) ---------------------------------------- */
+.overview .first-run { display: flex; align-items: center; gap: 16px; }
+.overview .first-run .empty-icon { flex: none; margin: 0; color: var(--brand); }
+.overview .first-run p { flex: 1 1 auto; margin: 0; font-size: 13px; line-height: 20px; color: var(--text-dim); max-width: 72ch; }
+.overview .first-run p strong { color: var(--text); font-weight: 600; }
+.overview .first-run .btn { flex: none; margin-left: auto; }
+
+/* "(server time)" qualifies the heading without shouting. */
+.overview .th-note { font-weight: 400; }
+
+@media (max-width: 860px) {
+  .overview .runs-table td.first { width: auto; }
+  .overview .grid.two .card-head { min-height: 0; }
+  /* Secondary columns give way so the name and the date fit on a phone. */
+  .overview .col-opt { display: none; }
+  .overview .attention .notice { padding-right: 16px; }
+  .overview .attention .notice a.attention-link { position: static; display: inline-block; margin-top: 4px; }
+  .overview .first-run { flex-wrap: wrap; align-items: flex-start; }
+  .overview .first-run p { flex-basis: calc(100% - 48px); }
+  .overview .first-run .btn { margin-left: 48px; }
+}
+
+/* The error line under a failed run's name stays tight to the name. */
+.overview .runs-table .row-error { margin-top: 0; line-height: 16px; }

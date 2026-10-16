@@ -154,7 +154,9 @@ func (s *Store) DeleteMongoSource(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	users, err := s.jobNames(ctx, `SELECT name FROM job_configs WHERE mongo_source_alias = ? ORDER BY name`, record.Alias)
+	users, err := s.jobNames(ctx, `
+		SELECT name FROM job_configs
+		WHERE source_engine = 'mongodb' AND mongo_source_alias = ? ORDER BY name`, record.Alias)
 	if err != nil {
 		return err
 	}
@@ -285,10 +287,18 @@ func (s *Store) SaveDestination(ctx context.Context, record *DestinationRecord) 
 	// Validation needs the whole account, and on an edit the secrets live in
 	// the database rather than in the form that was just posted.
 	complete := record.Destination
+	retargeted := false
 	if record.ID != "" {
 		stored, err := s.DestinationByID(ctx, record.ID)
 		if err != nil {
 			return err
+		}
+		// A stored credential belongs to the place it was entered for. Moved to
+		// another provider, endpoint or impersonated user, a blank field cannot
+		// mean "keep": that would hand the secret to whoever chose the new target.
+		retargeted = destinationRetargeted(stored.Destination, complete)
+		if retargeted {
+			stored.Destination = config.Destination{}
 		}
 		if complete.SecretAccessKey == "" {
 			complete.SecretAccessKey = stored.SecretAccessKey
@@ -352,7 +362,8 @@ func (s *Store) SaveDestination(ctx context.Context, record *DestinationRecord) 
 	}
 
 	// Each credential is written only when the form supplied one, so a blank
-	// field keeps the stored value instead of erasing it.
+	// field keeps the stored value instead of erasing it — unless the account
+	// now points somewhere else, when a blank field forgets the stored value.
 	rekeyed := false
 	for _, credential := range []struct {
 		column string
@@ -365,6 +376,10 @@ func (s *Store) SaveDestination(ctx context.Context, record *DestinationRecord) 
 		{"oauth_refresh_token_enc", record.OAuthRefreshToken},
 	} {
 		if credential.value == "" {
+			if retargeted {
+				sets = append(sets, credential.column+" = NULL")
+				rekeyed = true
+			}
 			continue
 		}
 		sealed, err := s.secrets.Seal(credential.value)
@@ -384,6 +399,17 @@ func (s *Store) SaveDestination(ctx context.Context, record *DestinationRecord) 
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE destinations SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	return aliasError("destination", record.Alias, err)
+}
+
+// destinationRetargeted reports whether an edit moves an account to a different
+// place its stored credentials would be presented to: another provider, another
+// endpoint host, or another user impersonated through a service account key.
+// A bucket, region or folder change stays with the same service and the same
+// identity, so the operator need not retype the secret for one.
+func destinationRetargeted(stored, edited config.Destination) bool {
+	return stored.Provider != edited.Provider ||
+		!strings.EqualFold(strings.TrimSpace(stored.Endpoint), strings.TrimSpace(edited.Endpoint)) ||
+		stored.DriveSubject != edited.DriveSubject
 }
 
 // DeleteDestination removes a backup account, unless a config still writes to
@@ -524,7 +550,8 @@ const jobColumns = `
 	batch_max_docs, batch_max_bytes, batch_fetch_size, codec, codec_level, output_format,
 	key_template, delete_after_archive, verify_before_delete, delete_batch_size,
 	COALESCE(schedule_cron, ''), COALESCE(schedule_every, ''), COALESCE(schedule_at, ''),
-	schedule_timezone, max_docs_per_run, max_runtime, dry_run, sha256, created_at, updated_at`
+	schedule_timezone, max_docs_per_run, max_runtime, dry_run, sha256, created_at, updated_at,
+	source_engine, COALESCE(postgres_source_alias, '')`
 
 // ListJobs returns every retention config, each prepared, and each marked with
 // the reason it cannot run if there is one.
@@ -656,13 +683,24 @@ func (s *Store) SaveJob(ctx context.Context, record *JobRecord) error {
 	if err != nil {
 		return err
 	}
+	pgSources, err := s.PostgresSourceMap(ctx)
+	if err != nil {
+		return err
+	}
 	destinations, err := s.DestinationMap(ctx)
 	if err != nil {
 		return err
 	}
 	job := record.Config
-	if err := job.Validate(config.Catalog{Destinations: destinations, Sources: sources}); err != nil {
+	if err := job.Validate(config.Catalog{Destinations: destinations, Sources: sources, PostgresSources: pgSources}); err != nil {
 		return err
+	}
+	// Only the engine's own alias is kept, so the in-use check on deleting an
+	// account of the other engine cannot match a stale one.
+	if job.Source.IsPostgres() {
+		job.Source.MongoSource = ""
+	} else {
+		job.Source.PostgresSource = ""
 	}
 	job.SHA256 = job.ComputeSHA()
 
@@ -682,7 +720,8 @@ func (s *Store) SaveJob(ctx context.Context, record *JobRecord) error {
 		boolToInt(job.Retention.DeleteAfterArchive), boolToInt(job.ShouldVerify()), job.Retention.DeleteBatchSize,
 		nullIfEmpty(job.Schedule.Cron), nullIfEmpty(job.Schedule.Every), nullIfEmpty(job.Schedule.At),
 		job.Schedule.Timezone, job.Limits.MaxDocsPerRun, job.Limits.MaxRuntime.Std().String(),
-		boolToInt(job.DryRun), job.SHA256, timeText(now),
+		boolToInt(job.DryRun), job.SHA256, job.Source.EngineName(), nullIfEmpty(job.Source.PostgresSource),
+		timeText(now),
 	}
 
 	if record.ID == "" {
@@ -694,8 +733,9 @@ func (s *Store) SaveJob(ctx context.Context, record *JobRecord) error {
 				batch_max_docs, batch_max_bytes, batch_fetch_size, codec, codec_level, output_format,
 				key_template, delete_after_archive, verify_before_delete, delete_batch_size,
 				schedule_cron, schedule_every, schedule_at, schedule_timezone,
-				max_docs_per_run, max_runtime, dry_run, sha256, updated_at, id, created_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				max_docs_per_run, max_runtime, dry_run, sha256, source_engine, postgres_source_alias,
+				updated_at, id, created_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			append(args, record.ID, timeText(now))...)
 	} else {
 		record.UpdatedAt = now
@@ -706,7 +746,8 @@ func (s *Store) SaveJob(ctx context.Context, record *JobRecord) error {
 				codec = ?, codec_level = ?, output_format = ?, key_template = ?,
 				delete_after_archive = ?, verify_before_delete = ?, delete_batch_size = ?,
 				schedule_cron = ?, schedule_every = ?, schedule_at = ?, schedule_timezone = ?,
-				max_docs_per_run = ?, max_runtime = ?, dry_run = ?, sha256 = ?, updated_at = ?
+				max_docs_per_run = ?, max_runtime = ?, dry_run = ?, sha256 = ?, source_engine = ?,
+				postgres_source_alias = ?, updated_at = ?
 			WHERE id = ?`, append(args, record.ID)...)
 	}
 	if err != nil {
@@ -816,6 +857,7 @@ func scanJob(row interface{ Scan(...any) error }) (JobRecord, error) {
 		maxBytes                             int64
 		maxRuntime                           string
 		createdAt, updatedAt                 string
+		engine                               string
 	)
 	if err := row.Scan(&record.ID, &job.Name, &enabled, &job.Source.MongoSource, &job.Source.Database,
 		&job.Source.Collection, &filterJSON, &projectionJSON, &job.Source.ReadPreference,
@@ -823,8 +865,13 @@ func scanJob(row interface{ Scan(...any) error }) (JobRecord, error) {
 		&job.Compression.Codec, &job.Compression.Level, &job.Output.Format, &job.Output.KeyTemplate,
 		&deleteAfter, &verify, &job.Retention.DeleteBatchSize, &job.Schedule.Cron, &job.Schedule.Every,
 		&job.Schedule.At, &job.Schedule.Timezone, &job.Limits.MaxDocsPerRun, &maxRuntime,
-		&dryRun, &job.SHA256, &createdAt, &updatedAt); err != nil {
+		&dryRun, &job.SHA256, &createdAt, &updatedAt, &engine, &job.Source.PostgresSource); err != nil {
 		return record, err
+	}
+	// MongoDB is stored by name but held as the empty default, so a config's
+	// fingerprint is the same as it was before engines existed.
+	if engine != config.EngineMongo {
+		job.Source.Engine = engine
 	}
 
 	job.Source.Filter = json.RawMessage(filterJSON)

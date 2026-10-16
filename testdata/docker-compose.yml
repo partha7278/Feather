@@ -1,4 +1,5 @@
 # Local verification rig for feather. Not for production use.
+# PostgreSQL listens on 5433 so it does not collide with a local server.
 #   docker compose -f testdata/docker-compose.yml up -d
 #
 # MinIO stands in for both S3 accounts and for Oracle Object Storage: all three
@@ -13,6 +14,22 @@ services:
     command: ["--quiet"]
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    # 12 is the oldest feather supports (it reads pg_attribute.attgenerated);
+    # the rig runs a current release.
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: feather
+      POSTGRES_PASSWORD: feather
+      POSTGRES_DB: feather
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "feather"]
       interval: 3s
       timeout: 5s
       retries: 20

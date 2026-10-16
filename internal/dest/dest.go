@@ -44,6 +44,54 @@ type Destination interface {
 	Verify(ctx context.Context, obj StoredObject) error
 }
 
+// withPrefix joins a destination prefix to a run-generated key. Dot segments
+// in the key are percent-encoded, so neither an S3 server or proxy resolving
+// the request path nor a Drive folder walk can treat them as "go up": a key
+// built from an odd collection or config name cannot climb out of the prefix
+// into another tenant's objects. Ordinary keys come back unchanged.
+func withPrefix(prefix, key string) string {
+	key = neutralizeDotSegments(key)
+	if prefix == "" {
+		return key
+	}
+	return strings.TrimSuffix(prefix, "/") + "/" + key
+}
+
+func neutralizeDotSegments(key string) string {
+	segments := strings.Split(key, "/")
+	changed := false
+	for i, segment := range segments {
+		if segment == "." || segment == ".." {
+			segments[i] = strings.ReplaceAll(segment, ".", "%2E")
+			changed = true
+		}
+	}
+	if !changed {
+		return key
+	}
+	return strings.Join(segments, "/")
+}
+
+// checkKey refuses an object key that a server, proxy or folder walk could
+// resolve to somewhere other than where it reads: one with a "." or ".."
+// segment (backslash counts as a separator, since some proxies normalise it to
+// a slash), a NUL, or no file name. Keys from Key never trip it; it guards
+// Upload against a caller that built a key some other way.
+func checkKey(key string) error {
+	if key == "" || strings.HasSuffix(key, "/") {
+		return fmt.Errorf("object key %q does not end in a file name", key)
+	}
+	if strings.ContainsRune(key, 0) {
+		return fmt.Errorf("object key %q contains a NUL byte", key)
+	}
+	for _, segment := range strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("object key %q contains a %q segment", key, segment)
+		}
+	}
+	return nil
+}
+
 // StoredObject names a copy that has just been written and states what it has
 // to turn out to be.
 type StoredObject struct {
