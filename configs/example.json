@@ -11,7 +11,7 @@
     },
     "timestampField": "createdAt"
   },
-  "batch": { "maxDocs": 50000, "maxBytes": "256MB" },
+  "batch": { "maxDocs": 10000000, "maxBytes": "20GB" },
   "compression": { "codec": "gzip", "level": 6 },
   "output": {
     "keyTemplate": "archive/{db}/{collection}/{yyyy}-{MM}/{config}-{ts}-{runId}-{seq}{ext}"

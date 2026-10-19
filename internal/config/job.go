@@ -161,6 +161,12 @@ const (
 	FormatNDJSON = "ndjson"
 
 	DefaultKeyTemplate = "feather/{db}/{collection}/{yyyy}/{MM}/{dd}/{config}-{runId}-{seq}{ext}"
+
+	// The batch limits default high enough that a run writes one file: a
+	// run's documents end up in a single archive at a single URL. Lower them
+	// to split a large run across several files.
+	DefaultBatchMaxDocs  = 10_000_000
+	DefaultBatchMaxBytes = ByteSize(20 << 30)
 )
 
 // IsEnabled reports whether the daemon should schedule this job. Absent means
@@ -210,10 +216,10 @@ func (c *JobConfig) applyDefaults() {
 		c.Source.Projection = nil
 	}
 	if c.Batch.MaxDocs <= 0 {
-		c.Batch.MaxDocs = 50_000
+		c.Batch.MaxDocs = DefaultBatchMaxDocs
 	}
 	if c.Batch.MaxBytes <= 0 {
-		c.Batch.MaxBytes = 256 << 20
+		c.Batch.MaxBytes = DefaultBatchMaxBytes
 	}
 	if c.Batch.FetchSize <= 0 {
 		c.Batch.FetchSize = 1000

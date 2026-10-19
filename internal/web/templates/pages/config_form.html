@@ -273,7 +273,7 @@
     </header>
     <div class="section-body">
       <details>
-        <summary>Show batching and limits <span class="dim">— the defaults suit a small VPS</span></summary>
+        <summary>Show batching and limits <span class="dim">— by default a whole run goes into one file</span></summary>
         <div class="row">
           <div class="field">
             <label for="batchMaxDocs">Documents per file</label>
@@ -281,7 +281,7 @@
           </div>
           <div class="field">
             <label for="batchMaxBytes">Uncompressed bytes per file</label>
-            <input type="text" id="batchMaxBytes" name="batchMaxBytes" value="{{.Data.MaxBytes}}" placeholder="256MB" class="field-narrow">
+            <input type="text" id="batchMaxBytes" name="batchMaxBytes" value="{{.Data.MaxBytes}}" placeholder="20GB" class="field-narrow">
           </div>
           <div class="field">
             <label for="fetchSize">Cursor batch size</label>

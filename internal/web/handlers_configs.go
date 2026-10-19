@@ -263,7 +263,7 @@ func jobFromForm(f *form) (*config.JobConfig, error) {
 			TimestampField: f.String("timestampField"),
 		},
 		Batch: config.Batch{
-			MaxDocs:   f.Int("batchMaxDocs", 50_000),
+			MaxDocs:   f.Int("batchMaxDocs", config.DefaultBatchMaxDocs),
 			FetchSize: int32(f.Int("fetchSize", 1000)),
 		},
 		Compression: config.Compression{
